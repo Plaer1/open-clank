@@ -51,6 +51,7 @@ export type ContextFrame = {
   sources: ContextSource[]
   omittedSourceCount: number
   sourceMapping: "unknown"
+  profile?: FrameProfile
   components: { prompt: Component; instructions: Component; tools: Component }
   tokens: { basis: "unavailable" }
 }
@@ -169,11 +170,35 @@ function component(value: unknown): Component {
   }
 }
 
+type FrameProfile = { personaInstructions: string | null; standingGuidance: string | null; recalledMemery: string | null }
+type ProfileInputs = { persona?: string; guidance?: StandingGuidanceEvidence; recall?: ContextPrefaceEvidence }
+
+// These fingerprints describe the assembled provider frame. Keep raw private
+// content out of persisted assistant metadata, including policy and memory text.
+function profileInFrame(candidate: ProfileInputs, prompt: unknown, instructions: unknown): FrameProfile {
+  const messages = Array.isArray(prompt) ? prompt : []
+  const systems = messages.filter(message => message?.role === "system" && typeof message.content === "string")
+    .map(message => message.content as string)
+  if (typeof instructions === "string") systems.push(instructions)
+  const uniqueBlock = (text: string | undefined) => {
+    if (!text || text.length > 65536) return null
+    const matches = systems.filter(system => system.includes(text))
+    return matches.length === 1 && matches[0].indexOf(text) === matches[0].lastIndexOf(text)
+      ? createHash("sha256").update(text, "utf8").digest("hex") : null
+  }
+  const guidance = candidate.guidance
+  return {
+    personaInstructions: uniqueBlock(candidate.persona),
+    standingGuidance: guidance && uniqueBlock(guidance.text) === guidance.textSHA256 ? guidance.textSHA256 : null,
+    recalledMemery: contextPrefaceFrame(candidate.recall, messages)?.textSHA256 ?? null,
+  }
+}
+
 export function contextFrame(input: {
   providerID: string; modelID: string; window: Window; sources?: ContextSource[]; omittedSourceCount?: number
   sequence: ContextFrame["sequence"]
   identity: ContextFrame["identity"]
-  prompt: unknown; instructions: unknown; tools: unknown
+  prompt: unknown; instructions: unknown; tools: unknown; profileInputs?: ProfileInputs
 }): ContextFrame {
   const sources = input.sources ?? []
   return {
@@ -182,6 +207,7 @@ export function contextFrame(input: {
     model: { providerID: input.providerID, modelID: input.modelID, window: { ...input.window } },
     sources: sources.slice(0, MAX_SOURCES).map((source) => ({ ...source })),
     omittedSourceCount: (input.omittedSourceCount ?? 0) + Math.max(0, sources.length - MAX_SOURCES), sourceMapping: "unknown",
+    ...(input.profileInputs ? {profile: profileInFrame(input.profileInputs, input.prompt, input.instructions)} : {}),
     components: { prompt: component(input.prompt), instructions: component(input.instructions), tools: component(input.tools) },
     tokens: { basis: "unavailable" },
   }
@@ -300,6 +326,8 @@ export function projectContextInspection(value: unknown) {
         f.sourceMapping !== "unknown" || f.tokens?.basis !== "unavailable" || !f.components) return undefined
     const prompt = componentValue(f.components.prompt), instructions = componentValue(f.components.instructions), tools = componentValue(f.components.tools)
     if (!prompt || !instructions || !tools) return undefined
+    if (f.profile !== undefined && (!f.profile || Object.keys(f.profile).sort().join(",") !== "personaInstructions,recalledMemery,standingGuidance"
+        || !Object.values(f.profile).every(v => v === null || (typeof v === "string" && /^[a-f0-9]{64}$/.test(v))))) return undefined
     const sources: ContextSource[] = []
     for (const source of f.sources) {
       if (!source || !["message", "part", "fork_snapshot", "generated_artifact", "media_input"].includes(source.kind) || !text(source.id) ||
@@ -331,7 +359,7 @@ export function projectContextInspection(value: unknown) {
         ...(identity.executionRevision !== undefined ? {executionRevision:identity.executionRevision} : {}),
         ...(identity.rootOperationID ? {rootOperationID:identity.rootOperationID} : {}), ...(identity.innerTurnID ? {innerTurnID:identity.innerTurnID} : {})},
       model:{providerID:f.model.providerID, modelID:f.model.modelID, window:{hard:f.model.window.hard, effective:f.model.window.effective, usable:f.model.window.usable, source:f.model.window.source}},
-      sources, omittedSourceCount:f.omittedSourceCount, sourceMapping:"unknown", components:{prompt,instructions,tools}, tokens:{basis:"unavailable"}})
+      sources, omittedSourceCount:f.omittedSourceCount, sourceMapping:"unknown", ...(f.profile ? {profile:{...f.profile}} : {}), components:{prompt,instructions,tools}, tokens:{basis:"unavailable"}})
   }
   const comparable=({stage: _stage,observedAt: _observedAt,...rest}:ContextFrame)=>JSON.stringify(rest)
   if (projected.some((frame,index)=>frame.stage==='model_view_dispatch_observed' &&

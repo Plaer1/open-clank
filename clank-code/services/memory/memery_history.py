@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import time
@@ -16,6 +17,24 @@ from src.memory_versioned import history_block_visible
 
 log = logging.getLogger(__name__)
 BATCH = 32
+# Each table has an independent durable cursor. Older records/asset streams keep their wire IDs.
+COLLECTIONS = (("memery_records", {}), ("memery_artifacts", {"assets": True}),
+               ("general_hex", {"guidance": True}))
+
+_HEX_COLUMNS = """rowid,owner_id,hex_id AS block_id,revision,
+    json_extract(record_json,'$.hash') AS content_hash,
+    'general-hex:' || json_extract(record_json,'$.hash') AS change_set_id,
+    json_extract(record_json,'$.created_at') AS created_at,0 AS evidence"""
+
+
+def _live_guidance(db, owner, block, revision):
+    return db.execute(f"""SELECT {_HEX_COLUMNS} FROM fm_general_hex_revisions r
+        WHERE r.owner_id=? AND r.hex_id=? AND r.revision=?
+        AND json_type(r.record_json, '$.accepted')='true'
+        AND json_type(r.record_json, '$.deleted')='false'
+        AND EXISTS(SELECT 1 FROM fm_general_hex_heads h WHERE h.owner_id=r.owner_id
+                   AND h.hex_id=r.hex_id AND h.deleted=0)""", (owner, block, revision)).fetchone()
+
 
 
 def change_key(value):
@@ -46,13 +65,41 @@ def reference(row):
             "at": persisted_time(row["created_at"]), "evidence": bool(row["evidence"])}
 
 
-def _query_batch(path, owner, workspace, manifest, *, assets=False, enumerate_only=False, recheck_offset=None):
+def read_guidance_revision(path, owner, hex_id, revision):
+    """Rehydrate a visible, accepted owner revision. Lore stores its reference only."""
+    with closing(sqlite3.connect("file:" + quote(str(path), safe="/") + "?mode=ro",
+                                 uri=True, timeout=0.5)) as db:
+        db.row_factory = sqlite3.Row
+        db.execute("BEGIN")
+        row = _live_guidance(db, owner, hex_id, revision)
+        if row is None:
+            return None
+        raw, = db.execute("""SELECT record_json FROM fm_general_hex_revisions
+            WHERE owner_id=? AND hex_id=? AND revision=?""", (owner, hex_id, revision)).fetchone()
+        record = json.loads(raw)
+        digest = record.pop("hash")
+        encoded = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        if (digest != hashlib.sha256(encoded.encode()).hexdigest()
+                or record["hex_id"] != hex_id or record["revision"] != revision):
+            return None
+        return reference(row), {k: record[k] for k in ("title", "body", "enabled", "revision")}
+
+
+def _query_batch(path, owner, workspace, manifest, *, assets=False, guidance=False, enumerate_only=False, recheck_offset=None):
     with closing(sqlite3.connect("file:" + quote(str(path), safe="/") + "?mode=ro",
                                  uri=True, timeout=0.5)) as db:
         db.row_factory = sqlite3.Row
         db.execute("BEGIN")
         position, witness = manifest["position"], manifest["witness"]
-        if assets:
+        if guidance:
+            table = "fm_general_hex_revisions"
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                return 0, "", [], [entry["change"] for entry in manifest["entries"]]
+            columns = _HEX_COLUMNS
+
+            def live(block, revision):
+                return _live_guidance(db, owner, block, revision)
+        elif assets:
             if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='fm_v2_media_assets'").fetchone():
                 return 0, "", [], [entry["change"] for entry in manifest["entries"]]
             columns = """rowid,owner_id,asset_id AS block_id,1 AS revision,canonical_sha256 AS content_hash,
@@ -150,10 +197,10 @@ async def publish_loop(state, users):
                 scope = provider._scope(owner)
                 supervisor = state.history_supervisor
                 client = client_for(supervisor, account)
-                for assets in (False, True):
-                    manifest = await asyncio.to_thread(client.get_memery_manifest, assets=assets)
+                for _, collection in COLLECTIONS:
+                    manifest = await asyncio.to_thread(client.get_memery_manifest, **collection)
                     position, witness, add, remove = await asyncio.to_thread(
-                        _query_batch, path, scope.owner, scope.workspace_id, manifest, assets=assets, recheck_offset=offset)
+                        _query_batch, path, scope.owner, scope.workspace_id, manifest, recheck_offset=offset, **collection)
                     if (not account_current(state, owner, account) or state.history_supervisor is not supervisor or
                             (canonical_source_provider(state) or getattr(state, "memory_provider", None)) is not provider):
                         break
@@ -165,10 +212,10 @@ async def publish_loop(state, users):
                     if remove and add:
                         # Erasure must make progress even when new records hit the storage ceiling.
                         manifest = await asyncio.to_thread(client.settle_memery_manifest, manifest["generation"],
-                            manifest["position"], manifest["witness"], [], remove, assets=assets)
+                            manifest["position"], manifest["witness"], [], remove, **collection)
                         remove = []
                     await asyncio.to_thread(client.settle_memery_manifest, manifest["generation"],
-                                            position, witness, add, remove, assets=assets)
+                                            position, witness, add, remove, **collection)
                 else:
                     if (periodic or purged) and account_current(state, owner, account):
                         await asyncio.to_thread(client.sweep_memery_components)

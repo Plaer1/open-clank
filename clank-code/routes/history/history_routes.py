@@ -3502,9 +3502,9 @@ def setup_history_settings_routes() -> APIRouter:
     router.add_api_route("/memery/{memory_id}/versions", memery_versions, methods=["GET"],
                          route_class_override=_PrivateHistoryRoute)
 
-    async def recorded_memery(request: Request, offset: int = Query(default=0, ge=0, le=512)):
+    async def recorded_memery(request: Request, offset: int = Query(default=0, ge=0, le=768)):
         from urllib.parse import quote
-        from services.memory.memery_history import account_current, client_for, _query_batch
+        from services.memory.memery_history import account_current, client_for, COLLECTIONS, _query_batch
         from src.openclank.chat_source_bridge import canonical_source_provider
 
         owner = require_user(request)
@@ -3519,26 +3519,74 @@ def setup_history_settings_routes() -> APIRouter:
         scope = provider._scope(owner)
         client = client_for(state.history_supervisor, account)
         items = []
-        for assets in (False, True):
-            manifest = await _bounded_history_io(lambda: client.get_memery_manifest(assets=assets))
+        for category, collection in COLLECTIONS:
+            manifest = await _bounded_history_io(lambda: client.get_memery_manifest(**collection))
             _, _, _, removed = await _bounded_history_io(lambda: _query_batch(
-                path, scope.owner, scope.workspace_id, manifest, assets=assets, enumerate_only=True))
+                path, scope.owner, scope.workspace_id, manifest, enumerate_only=True, **collection))
             for entry in manifest["entries"]:
                 if entry["change"] in removed:
                     continue
                 resource = quote(entry["block"], safe="")
+                label = category
+                if category == "general_hex":
+                    url = f"/api/history/memery/guidance/{resource}/versions/{entry['revision']}"
+                elif category == "memery_artifacts":
+                    url = f"/api/memory/assets/{resource}"
+                else:
+                    url = f"/api/history/memery/{resource}/versions"
+                    if entry["evidence"]:
+                        label = "memery_evidence"
                 items.append({"resource_id": entry["block"], "revision": entry["revision"],
-                              "recorded_at_millis": entry["at"],
-                              "category": "memery_artifacts" if assets else
-                                          "memery_evidence" if entry["evidence"] else "memery_records",
-                              "detail_url": f"/api/memory/assets/{resource}" if assets else
-                                            f"/api/history/memery/{resource}/versions"})
+                              "recorded_at_millis": entry["at"], "category": label, "detail_url": url})
         if get_current_user(request) != owner or not account_current(state, owner, account):
             raise HTTPException(403, "Memery authorization changed")
         items.sort(key=lambda v: (v["recorded_at_millis"], v["resource_id"], v["revision"]), reverse=True)
         return {"items": items[offset:offset + 50], "next_offset": offset + 50 if len(items) > offset + 50 else None}
 
     router.add_api_route("/memery/recorded", recorded_memery, methods=["GET"], route_class_override=_PrivateHistoryRoute)
+
+    async def guidance_version(hex_id: str, revision: int, request: Request):
+        from services.memory.memery_history import account_current, client_for, read_guidance_revision
+        from src.openclank.chat_source_bridge import canonical_source_provider
+        from src.openclank.analysis_snapshot_host import snapshot_named_human
+
+        checkpoint = request.method == "POST"
+        try:
+            owner = snapshot_named_human(request) if checkpoint else require_user(request)
+        except ValueError:
+            raise HTTPException(403, "A named Memery manager is required") from None
+        state = request.app.state
+        account = state.auth_manager.account_id(owner)
+        def authorize():
+            if get_current_user(request) != owner or not account_current(state, owner, account):
+                raise HTTPException(403, "Memery authorization changed")
+        authorize()
+        if not re.fullmatch(r"[0-9a-f]{32}", hex_id) or not 0 < revision < 2**63:
+            raise HTTPException(404, "Guidance revision unavailable")
+        provider = canonical_source_provider(state) or getattr(state, "memory_provider", None)
+        path = provider._local_db_path() if hasattr(provider, "_local_db_path") else None
+        if not path or not getattr(state, "history_supervisor", None):
+            raise HTTPException(503, "Guidance history unavailable")
+        client = client_for(state.history_supervisor, account)
+        manifest = await _bounded_history_io(lambda: client.get_memery_manifest(guidance=True))
+        value = await _bounded_history_io(lambda: read_guidance_revision(path, owner, hex_id, revision))
+        if value is None:
+            raise HTTPException(404, "Guidance revision unavailable")
+        ref, detail = value
+        authorize()
+        if checkpoint:
+            manifest = await _bounded_history_io(lambda: client.settle_memery_manifest(
+                manifest["generation"], manifest["position"], manifest["witness"], [ref], [],
+                guidance=True, checkpoint=True))
+            authorize()
+        if ref not in manifest["entries"]:
+            raise HTTPException(409 if checkpoint else 404, "Guidance revision is not retained")
+        return {"recorded": True, "revision": revision} if checkpoint else detail
+
+    router.add_api_route("/memery/guidance/{hex_id}/versions/{revision}", guidance_version,
+                         methods=["GET"], route_class_override=_PrivateHistoryRoute)
+    router.add_api_route("/memery/guidance/{hex_id}/versions/{revision}/checkpoint", guidance_version,
+                         methods=["POST"], route_class_override=_PrivateHistoryRoute)
 
     async def checkpoint_memery(memory_id: str, revision: int, request: Request):
         from services.memory.memery_history import account_current, client_for, reference

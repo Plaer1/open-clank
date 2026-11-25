@@ -2398,7 +2398,7 @@ def _provider_dossier_source_blocked(conn, owner, source_id, revision):
     return False
 
 
-def _native_event_liveness(conn, owner, rows, tables):
+def _native_event_liveness(conn, owner, rows, tables, *, guidance_account=None):
     """Batch exact event evidence; unavailable BLAKE3 fails event reads closed."""
     try:
         import blake3
@@ -2453,6 +2453,8 @@ def _native_event_liveness(conn, owner, rows, tables):
     def valid(item, row):
         if item is None or item['source_uri'] is None or item['workspace_key'] != row['workspace_key'] or item['project_key'] != row['project_key']:
             return False
+        if guidance_account is not None and (item['erased'] or item['forget_state'] != 'active'):
+            return False
         if (item['source_id'].startswith('provider_dossier_') or item['source_uri'].startswith('provider-dossier://')
                 or item['source_type'] == 'provider_dossier.v1' or item['locator_type'] == 'provider_dossier.v1'):
             return False
@@ -2470,10 +2472,14 @@ def _native_event_liveness(conn, owner, rows, tables):
                         or item['project_key'] != '' or item['erased'] or not item['source_id'].startswith('hostpart_')
                         or item['source_uri'] != 'host-archive://' + item['source_id'] or 'candidates' not in tables or 'fm_v2_jobs' not in tables):
                     return False
+                # Native S08 candidates bind the originating account and job in their ID.
+                candidate = None if guidance_account is None else 's08candidate_' + hashlib.sha256(
+                    json.dumps([guidance_account, job], ensure_ascii=False, separators=(',', ':')).encode()
+                ).hexdigest()
                 return conn.execute(
                     "SELECT 1 FROM fm_v2_jobs j JOIN candidates c ON c.owner=j.owner_id AND c.turn_id=j.job_id AND c.source_uri='s08://'||j.job_id "
-                    "WHERE j.owner_id=? AND j.job_id=? AND j.kind='access_consolidation' AND j.workspace_key=? AND c.workspace_id=? LIMIT 1",
-                    (owner, job, row['workspace_key'], row['workspace_key'])).fetchone() is not None
+                    "WHERE j.owner_id=? AND j.job_id=? AND j.kind='access_consolidation' AND j.workspace_key=? AND c.workspace_id=? AND (? IS NULL OR c.id=?) LIMIT 1",
+                    (owner, job, row['workspace_key'], row['workspace_key'], candidate, candidate)).fetchone() is not None
             except (ValueError, TypeError, KeyError, sqlite3.Error):
                 return False
         if item['locator_type'] == 'host_archive_part' or item['source_uri'].startswith('host-archive://'):
@@ -2499,6 +2505,7 @@ def _native_event_liveness(conn, owner, rows, tables):
                     except sqlite3.Error:
                         scope_ok = False
                 if (not scope_ok or ref.kind != 'host_user_body'
+                    or (guidance_account is not None and ref.account_id != guidance_account)
                     or ref.actor_id != 'main' or ref.part_id != 'body' or ref.project_id is not None
                     or any(type(v) is not str or not v or len(v) > 512 or v != v.strip() for v in identifiers)
                     or type(ref.revision) is not int or ref.revision < 1
@@ -2586,6 +2593,8 @@ def list_current_records(
     _include_revision_ref: bool = False,
     filters: Optional[dict[str, Any]] = None,
     _raise_errors: bool = False,
+    _connection: Optional[sqlite3.Connection] = None,
+    _guidance_account: Optional[str] = None,
     db_path: str = FM_DB_PATH,
 ) -> list[dict[str, Any]]:
     """Read the current typed projection without crossing tenant scopes.
@@ -2612,7 +2621,10 @@ def list_current_records(
         except (TypeError, ValueError):
             limit = 1000
     try:
-        with sqlite3.connect(db_path, timeout=30) as conn:
+        # A guidance approval shares the writer's transaction so the visible
+        # revision cannot change between evidence validation and the decision.
+        from contextlib import nullcontext
+        with (nullcontext(_connection) if _connection is not None else sqlite3.connect(db_path, timeout=30)) as conn:
             conn.row_factory = sqlite3.Row
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if not {"fm_v2_knowledge_blocks", "fm_v2_knowledge_revisions"}.issubset(tables):
@@ -2723,7 +2735,7 @@ def list_current_records(
                 """,
                 params,
             ).fetchall()
-            liveness = _native_event_liveness(conn, owner, rows, tables)
+            liveness = _native_event_liveness(conn, owner, rows, tables, guidance_account=_guidance_account)
             records: list[dict[str, Any]] = []
             for row in rows:
                 live, quote = liveness.get((row['block_id'], row['current_revision']), (False, ''))

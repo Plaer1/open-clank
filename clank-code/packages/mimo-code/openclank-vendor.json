@@ -65,13 +65,13 @@
     "id": "https://openclank.dev/contracts/managed-provider/v2",
     "version": 2,
     "repository_path": "contracts/openclank/managed-provider-v2.schema.json",
-    "sha256": "6f814b20c4a138996b2885725091ee28656da0f806a8d6753afb79f01f0eea8a"
+    "sha256": "a6d28a9d1b6130df6277fd280d1842c9613430ad69f8d84a045f9e3f24a2a81e"
   },
   "build": {
     "contract_version": 1,
     "source_date_epoch": 1794499778,
     "source_hash_algorithm": "openclank-tree-sha256-v1",
-    "source_sha256": "da1f25fbb5c4cc3f5393c4ec5661b3d097cc18d5282b7717e91651c53e7b67fc",
+    "source_sha256": "c28f3034b2450125369d7d44a8089d2209454aedf2c957c5bc3e2f9eb14cb8b1",
     "tier_1_targets": [
       "linux-x64",
       "linux-arm64",

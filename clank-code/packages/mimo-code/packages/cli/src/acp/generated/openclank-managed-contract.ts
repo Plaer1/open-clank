@@ -4,7 +4,7 @@ export const PROVIDER_STORE_VERSION = 1 as const
 export const OPERATION_ROUTER_VERSION = 1 as const
 export const SCHEMA_VERSION = 2 as const
 export const SCHEMA_ID = "https://openclank.dev/contracts/managed-provider/v2" as const
-export const SCHEMA_HASH = "6f814b20c4a138996b2885725091ee28656da0f806a8d6753afb79f01f0eea8a" as const
+export const SCHEMA_HASH = "a6d28a9d1b6130df6277fd280d1842c9613430ad69f8d84a045f9e3f24a2a81e" as const
 export const PROVIDER_ENDPOINT_POLICIES = {
   "xiaomi": {
     "metered_api": "mimo-metered-api-v1",

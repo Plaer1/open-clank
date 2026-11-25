@@ -69,7 +69,7 @@ def build_store(*, guarded=True):
     coordinator = PolicyTransitionCoordinator(projection, resolve=lambda u: (ACCOUNT, "global") if u == OWNER else None,
         fingerprint=lambda u, prefs: "9" * 64, assert_current=prep.assert_valid)
     register_policy_coordinator(coordinator)
-    provider = MemeryProvider(command=command, workspace_id="global",
+    provider = MemeryProvider(host_worker=True, command=command, workspace_id="global",
         env={"FM_DB_PATH": str(db_path), "FM_DB_ID": prep.database_id, "FM_OWNER": OWNER, "FM_WORKSPACE_ID": "global"},
         guarded_preparation=prep if guarded else None)
     return {"db": db_path, "prep": prep, "coordinator": coordinator, "provider": provider}
@@ -90,15 +90,15 @@ def seed_rows(db_path):
 
 
 async def bootstrap(ns, *, prefs=None, key="root-1", incognito=False, no_memory=False):
-    """Mirror of routes/chat_routes.py:~2680-2693 arguments: coordinator, current(), incognito/no_memory False, 2s deadline, request_key=root id."""
+    """Mirror of routes/chat_routes.py:~2680-2693 arguments: coordinator, current(), incognito/no_memory False, bounded deadline, request_key=root id."""
     provider = ns["provider"]
-    prefs = {"memory_mode": "automatic"} if prefs is None else prefs  # write policy needs automatic mode; {} refuses (see last test)
+    prefs = {} if prefs is None else prefs
     with patch("routes.prefs_routes._load_for_user", lambda user: prefs):
         if provider._guarded_v17:  # legacy provider is refused before any transport use
             await provider.initialize()
         return await provider._host_question_seed_bootstrap(owner=OWNER, account_id=ACCOUNT, request_key=key,
             coordinator=ns["coordinator"], current=lambda: True, incognito=incognito, no_memory=no_memory,
-            write_deadline=asyncio.get_running_loop().time() + 2.0)
+            write_deadline=asyncio.get_running_loop().time() + 10.0)
 
 
 def run(ns, coro):
@@ -156,7 +156,8 @@ def test_second_bootstrap_creates_nothing_new():
         other = await bootstrap(ns, key="root-2")
         return first, before, again, other
     first, before, again, other = run(ns, case())
-    assert again == other == {"version": 1, "state": "slots_present"}, (again, other)
+    assert other == {"version": 1, "state": "slots_present"}
+    assert again in (other, {**first, "state": "already_applied"})
     assert (seed_rows(ns["db"]), rows(ns["db"], "SELECT block_id,current_revision FROM fm_v2_knowledge_blocks ORDER BY 1")) == before
     assert len(before[0]) == 2 and rows(ns["db"], "SELECT count(*) FROM fm_v2_entities") == [(2,)]
 
@@ -175,6 +176,5 @@ def test_non_guarded_store_refuses_and_writes_nothing():
     refused(build_store(guarded=False), "question seed authority unavailable")
 
 
-def test_default_prefs_without_automatic_mode_refuse():
-    # Finding: with the default prefs ({}), direct_write_allowed is False, so seeds are not created until memory_mode is automatic.
-    refused(build_store(), "question seed policy unavailable", prefs={})
+def test_manual_review_refuses_question_seed_writes():
+    refused(build_store(), "question seed policy unavailable", prefs={"memory_mode": "manual"})

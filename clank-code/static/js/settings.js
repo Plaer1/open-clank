@@ -894,6 +894,7 @@ export async function refreshAiModelEndpoints() {
    built-in characters are managed from the same card; enabling one for a
    chat stays in the chat bar's persona modal. */
 let _personasPanelWired = false;
+let personaLoadedAccount = null;
 let _personaState = { kind: 'default', id: null, defaultRecord: null, templates: [] };
 
 async function loadDefaultPersonaPanel() {
@@ -913,12 +914,18 @@ async function loadDefaultPersonaPanel() {
   }
 
   async function fetchState() {
+    const owner = document.body.dataset.accountId || '';
     const res = await checkedFetch('/api/presets/default-persona', { credentials: 'same-origin', cache: 'no-store' });
-    _personaState.defaultRecord = await res.json();
+    const defaultRecord = await res.json();
+    let templates;
     try {
       const tRes = await checkedFetch('/api/presets/templates', { credentials: 'same-origin', cache: 'no-store' });
-      _personaState.templates = tRes.ok ? await tRes.json() : [];
-    } catch (e) { _personaState.templates = []; }
+      templates = tRes.ok ? await tRes.json() : [];
+    } catch (e) { templates = []; }
+    if (owner !== (document.body.dataset.accountId || '')) throw new Error('Account changed');
+    _personaState.defaultRecord = defaultRecord;
+    _personaState.templates = templates;
+    personaLoadedAccount = owner;
   }
 
   async function builtinCharacters() {
@@ -1041,11 +1048,80 @@ async function loadDefaultPersonaPanel() {
 
   if (!_personasPanelWired) {
     _personasPanelWired = true;
+    const bundleInput = el('persona-profile-knowledge');
+    const profileFile = el('persona-profile-import');
+    const review = el('persona-profile-review');
+    const account = () => document.body.dataset.accountId || '';
+    let profileRevision = 0, snapshots = [];
+    const clearProfile = () => {
+      profileRevision++;
+      snapshots = [];
+      if (review) review.hidden = true;
+      if (profileFile) profileFile.value = '';
+      if (bundleInput) bundleInput.value = '';
+    };
+    const accountChanged = () => {
+      personaLoadedAccount = null;
+      nameEl.value = '';
+      promptEl.value = '';
+      clearProfile();
+    };
+    window.addEventListener('openclank:auth-context-changed', accountChanged);
+    document.addEventListener('openclank:auth-context-changed', accountChanged);
+    selectEl.addEventListener('change', clearProfile);
+    el('persona-profile-export')?.addEventListener('click', async () => {
+      const owner = account(), revision = profileRevision;
+      if (personaLoadedAccount !== owner) { setStatus('Reopen AI Defaults to load this account’s persona.'); return; }
+      const persona = {name: nameEl.value, system_prompt: promptEl.value};
+      const attachment = bundleInput?.files?.[0];
+      try {
+        const {exportProfile, MAX_PROFILE_BYTES} = await import('./personalityProfile.js');
+        if (attachment && attachment.size > MAX_PROFILE_BYTES) throw new Error('The knowledge bundle is too large.');
+        const bytes = await exportProfile(persona, attachment ? new Uint8Array(await attachment.arrayBuffer()) : null);
+        if (owner !== account() || revision !== profileRevision) return;
+        const url = URL.createObjectURL(new Blob([bytes], {type:'application/json'}));
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'open-clank-personality-profile.json';
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch { if (owner === account() && revision === profileRevision) setStatus('Check the persona fields and attached knowledge bundle.'); }
+    });
+    profileFile?.addEventListener('change', async () => {
+      const file = profileFile.files[0], owner = account();
+      clearProfile();
+      const revision = profileRevision;
+      if (!file || personaLoadedAccount !== owner) return;
+      try {
+        const {readProfile, MAX_PROFILE_BYTES} = await import('./personalityProfile.js');
+        if (file.size > MAX_PROFILE_BYTES) throw new Error('Too large');
+        const loaded = await readProfile(new Uint8Array(await file.arrayBuffer()));
+        if (owner !== account() || revision !== profileRevision) return;
+        selectEl.value = '__default__';
+        await showSelection('__default__');
+        if (owner !== account() || revision !== profileRevision) return;
+        nameEl.value = loaded.persona.name;
+        promptEl.value = loaded.persona.system_prompt;
+        snapshots = loaded.snapshots;
+        review.hidden = snapshots.length === 0;
+        setStatus('Review the persona, then Save to make it your default.');
+      } catch { if (owner === account() && revision === profileRevision) setStatus('Invalid personality profile or knowledge bundle.'); }
+    });
+    review?.addEventListener('click', async () => {
+      const owner = account(), revision = profileRevision;
+      const current = () => revision === profileRevision && owner === account() && review.isConnected;
+      const {openKnowledgeSnapshotBundleImport} = await import('./knowledgeSnapshot.js');
+      if (current() && snapshots.length) {
+        openKnowledgeSnapshotBundleImport({current, reviewedFileItems:snapshots});
+      }
+    });
+
     selectEl.addEventListener('change', () => { showSelection(selectEl.value); });
     const saveBtn = el('default-persona-save');
     if (saveBtn) saveBtn.addEventListener('click', saveCurrent);
     const newBtn = el('settings-persona-new');
     if (newBtn) newBtn.addEventListener('click', () => {
+      clearProfile();
       _personaState.kind = 'builtin'; _personaState.id = null; // saves create a template
       nameEl.value = ''; promptEl.value = '';
       if (resetBtn) resetBtn.style.display = 'none';

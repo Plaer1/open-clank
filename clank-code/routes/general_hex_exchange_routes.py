@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import Response
-from routes.general_hex_routes import _owner
+from routes.general_hex_routes import _owner, _human_change
 from src.general_hex_library import GeneralHexError, GeneralHexConflict, GeneralHexNotFound
 from src.general_hex_composition import GeneralHexComposition
 from src.general_hex_exchange import GeneralHexExchange
@@ -322,7 +322,7 @@ def setup_general_hex_exchange_routes(*, db_path_resolver, owner_resolver=_owner
         expected_hash = str(values.get('expected_contract_hash') or '').strip()
         if not workspace_id or not expected_hash:
             raise HTTPException(422, 'workspace_id and expected_contract_hash are required')
-        owner = owner_resolver(request); path = authority(); root = workspace_root(request, workspace_id)
+        owner = _human_change(request, owner_resolver); path = authority(); root = workspace_root(request, workspace_id)
         resolution = resolve_hex(root, workspace_root=root)
         if not resolution.contract_hash or resolution.contract_hash != expected_hash:
             raise HTTPException(409, 'Workspace contract changed after review; inspect it again before activation')
@@ -352,7 +352,7 @@ def setup_general_hex_exchange_routes(*, db_path_resolver, owner_resolver=_owner
 
     @router.post('/promote/save')
     def promote_save(request:Request,payload:dict=Body(...)):
-        return invoke(GeneralHexExchange(authority()).save_promotion,owner_id=owner_resolver(request),**fields(payload,('draft_id','expected_draft_revision','title','body','tags','enabled')))
+        return invoke(GeneralHexExchange(authority()).save_promotion,owner_id=_human_change(request, owner_resolver),**fields(payload,('draft_id','expected_draft_revision','title','body','tags','enabled')))
 
     @router.get('/general/{hex_id}/export')
     def export(request:Request,hex_id:str,revision:int|None=None):
@@ -366,7 +366,7 @@ def setup_general_hex_exchange_routes(*, db_path_resolver, owner_resolver=_owner
         values=fields(payload,('document','accept_assisted'))
         if type(values.get('accept_assisted',False)) is not bool:
             raise HTTPException(422,'accept_assisted must be boolean')
-        return invoke(GeneralHexExchange(authority()).import_payload,owner_id=owner_resolver(request),payload=values.get('document'),accept_assisted=values.get('accept_assisted',False))
+        return invoke(GeneralHexExchange(authority()).import_payload,owner_id=_human_change(request, owner_resolver),payload=values.get('document'),accept_assisted=values.get('accept_assisted',False))
 
     @router.post('/apply/preview')
     def apply_preview(request:Request,payload:dict=Body(...)):
@@ -374,6 +374,6 @@ def setup_general_hex_exchange_routes(*, db_path_resolver, owner_resolver=_owner
 
     @router.post('/apply')
     def apply(request:Request,payload:dict=Body(...)):
-        return invoke(GeneralHexExchange(authority()).apply,owner_id=owner_resolver(request),**fields(payload,('draft_id','expected_draft_revision')))
+        return invoke(GeneralHexExchange(authority()).apply,owner_id=_human_change(request, owner_resolver),**fields(payload,('draft_id','expected_draft_revision')))
 
     return router

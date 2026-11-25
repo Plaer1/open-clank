@@ -2228,7 +2228,15 @@ def setup_orchestration_routes(session_manager, *, owner_verifier=None, option_r
                         if (not any(isinstance(item,dict) and item.get("kind")=="media_input" and item.get("derivedView") for item in frame.get("sources",[]))
                                 or not any(isinstance(item,dict) and item.get("stage")=="provider_frame_pre_dispatch" and same(item)==same(frame) for item in frames[:frames.index(frame)])):
                             clean = []; break
-                    clean.append({"stage": frame["stage"], "observedAt": frame["observedAt"], "identity": safe_identity,
+                    profile = frame.get("profile")
+                    profile_fields = {"personaInstructions", "standingGuidance", "recalledMemery"}
+                    if profile is not None and (
+                        type(profile) is not dict or set(profile) != profile_fields
+                        or any(value is not None and (type(value) is not str or not re.fullmatch(r"[a-f0-9]{64}", value))
+                               for value in profile.values())
+                    ):
+                        clean = []; break
+                    clean.append({**({"profile": profile} if profile is not None else {}), "stage": frame["stage"], "observedAt": frame["observedAt"], "identity": safe_identity,
                         "sequence": {k: sequence[k] for k in ("attempt", "transform")}, "components": safe_components,
                         "model": {"providerID": model["providerID"], "modelID": model["modelID"], "window": {k: window[k] for k in ("hard", "effective", "usable", "source")}}, "sources": refs, "omittedSourceCount": frame["omittedSourceCount"], "sourceMapping": "unknown", "tokens": {"basis": "unavailable"}})
             deliveries = receipt.get("nativeDeliveries") if isinstance(receipt, dict) else None

@@ -87,3 +87,5 @@ keep cc_index disabled or filter `type` at search time to exclude
 the more sensitive categories.
 
 Use `operation: "manage"` with a `management` object to list, search, add, edit, delete or resolve records. Supply the action and relevant fields. Resolve an open question using its memory_id and either answer or answer_memory_id. Manual and guarded stores apply their existing review rules. An outcome_unknown receipt means the write may have happened.
+
+When previously accepted guidance is genuinely outdated, use manage action `guidance_context` with an optional evidence search `query`. It returns the Hex revisions in this turn and scoped memory evidence IDs. Use `propose_guidance` with `hex_id`, `expected_revision`, `change` (revise or retire), `reason` explaining what changed, and matching `evidence_ids`. Include the proposed `body` only for a revision. An inconvenient task is not evidence. Proposals await owner review in Settings → Hexes and do not change this turn's instructions.

@@ -56,7 +56,7 @@ impl HistoryCoordinator {
         let policy = self.policy_set()?.capture_for(account);
         let now = chrono::Utc::now().timestamp_millis() as u64;
         let minimum = now.saturating_sub(policy.max_age_days.unwrap_or(u64::MAX).saturating_mul(86_400_000));
-        Ok(self.catalog.memery_manifest(account, false)?.entries.iter()
+        Ok(self.catalog.memery_manifest(account, crate::catalog::MemeryCollection::RecordsOrAssets(false))?.entries.iter()
             .any(|item| item.change == change && item.evidence && item.at >= minimum))
     }
 

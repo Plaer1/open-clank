@@ -157,8 +157,10 @@ def _load():
     try:
         with open(PREFS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except (FileNotFoundError, json.JSONDecodeError):
+            if not isinstance(data, dict):
+                raise ValueError("Invalid preference store")
+            return data
+    except FileNotFoundError:
         return {}
 
 
@@ -699,10 +701,8 @@ def setup_prefs_routes():
             raise HTTPException(409 if exc.code in {"revision_conflict", "account_mismatch", "provider_unavailable"} else 422, {"code": exc.code, "message": str(exc)}) from exc
 
     def memery_preferences(prefs):
-        from src.memory_gate import PREF_KEY, memory_mode
+        from src.memory_gate import memory_mode
         mode = memory_mode(prefs)
-        if PREF_KEY not in prefs and type(prefs.get("auto_memory")) is bool:
-            mode = "automatic" if prefs["auto_memory"] else "off"
         from src.openclank.memery_preferences import normalize_preferences
         return {"enabled": prefs.get("memory_enabled") is not False, "mode": mode, **normalize_preferences(prefs)}
 
@@ -764,6 +764,9 @@ def setup_prefs_routes():
             from src.openclank.code_context import MAX_GRAPH_PROMPT_BUDGET, MIN_GRAPH_PROMPT_BUDGET
             if type(value) is not int or not MIN_GRAPH_PROMPT_BUDGET <= value <= MAX_GRAPH_PROMPT_BUDGET:
                 value = MAX_GRAPH_PROMPT_BUDGET
+        elif key == "memory_mode":
+            from src.memory_gate import memory_mode
+            value = memory_mode(prefs)
         elif key == 'memory_question_seeds':
             value = prefs.get(key, True)
         elif key in ('memory_assistant_interpretation', 'memory_policy_importance_enabled', 'memory_policy_connections_enabled', 'memory_policy_consolidation_enabled', 'memory_shadow_ranking_enabled'):

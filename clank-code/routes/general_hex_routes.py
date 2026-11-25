@@ -14,6 +14,14 @@ def _owner(request):
     return owner
 
 
+def _human_change(request, owner_resolver):
+    # Agent calls can propose guidance. Applying it is a signed-in owner action.
+    if (getattr(request.state, 'internal_tool_authenticated', False) or getattr(request.state, 'api_token', False)
+            or request.headers.get('authorization')):
+        raise HTTPException(403, 'Changing Hexes requires a signed-in user')
+    return owner_resolver(request)
+
+
 def setup_general_hex_routes(*, db_path=None, db_path_resolver=None, owner_resolver=_owner):
     router = APIRouter(prefix='/api/hexes', tags=['general-hexes'])
     repository = GeneralHexRepository(db_path)
@@ -57,7 +65,7 @@ def setup_general_hex_routes(*, db_path=None, db_path_resolver=None, owner_resol
 
     @router.post('/general')
     def create(request: Request, payload: dict = Body(...)):
-        owner = owner_resolver(request)
+        owner = _human_change(request, owner_resolver)
         values = fields(payload, ('title', 'body', 'tags', 'enabled', 'accepted', 'authorship', 'provenance'))
         return call(repository.create, owner, **reviewed(values, owner))
 
@@ -67,17 +75,17 @@ def setup_general_hex_routes(*, db_path=None, db_path_resolver=None, owner_resol
 
     @router.patch('/general/{hex_id}')
     def update(request: Request, hex_id: str, payload: dict = Body(...)):
-        owner = owner_resolver(request)
+        owner = _human_change(request, owner_resolver)
         values = fields(payload, ('expected_revision', 'title', 'body', 'tags', 'enabled', 'accepted', 'authorship', 'provenance'))
         if 'expected_revision' not in values:
             raise HTTPException(422, 'expected_revision is required')
         if 'provenance' not in values and (values.get('accepted') is True or ('title' in values and 'body' in values)):
             values['provenance'] = call(repository.get, owner, hex_id)['provenance']
-        return call(repository.update, owner, hex_id, **reviewed(values, owner))
+        return call(repository.update, owner, hex_id, account_id=request.app.state.auth_manager.account_id(owner), **reviewed(values, owner))
 
     @router.post('/general/{hex_id}/accept')
     def accept(request: Request, hex_id: str, payload: dict = Body(...)):
-        owner = owner_resolver(request)
+        owner = _human_change(request, owner_resolver)
         values = fields(payload, ('expected_revision',))
         if 'expected_revision' not in values:
             raise HTTPException(422, 'expected_revision is required')
@@ -92,11 +100,12 @@ def setup_general_hex_routes(*, db_path=None, db_path_resolver=None, owner_resol
 
     @router.post('/general/{hex_id}/restore')
     def restore(request: Request, hex_id: str, payload: dict = Body(...)):
-        return call(repository.restore, owner_resolver(request), hex_id, **fields(payload, ('revision', 'expected_revision')))
+        owner = _human_change(request, owner_resolver)
+        return call(repository.restore, owner, hex_id, account_id=request.app.state.auth_manager.account_id(owner), **fields(payload, ('revision', 'expected_revision')))
 
     @router.delete('/general/{hex_id}')
     def delete(request: Request, hex_id: str, expected_revision: int):
-        return call(repository.delete, owner_resolver(request), hex_id, expected_revision=expected_revision)
+        return call(repository.delete, _human_change(request, owner_resolver), hex_id, expected_revision=expected_revision)
 
     @router.get('/context-tags/{context_kind}/{context_id:path}')
     def context(request: Request, context_kind: str, context_id: str):
@@ -104,6 +113,74 @@ def setup_general_hex_routes(*, db_path=None, db_path_resolver=None, owner_resol
 
     @router.put('/context-tags/{context_kind}/{context_id:path}')
     def save_context(request: Request, context_kind: str, context_id: str, payload: dict = Body(...)):
-        return call(repository.set_context_tags, owner_resolver(request), context_kind, context_id, **fields(payload, ('tags', 'expected_revision')))
+        return call(repository.set_context_tags, _human_change(request, owner_resolver), context_kind, context_id, **fields(payload, ('tags', 'expected_revision')))
 
+    def guidance_context(request):
+        from src.auth_helpers import require_privilege
+        from src.general_hex_guidance import GeneralHexGuidance
+        from src.general_hex_runtime import prepare_hex_authority
+        from src.memory_gate import memory_mode
+        from routes.prefs_routes import _load_for_user
+        owner = _human_change(request, owner_resolver)
+        if require_privilege(request, 'can_manage_memory') != owner:
+            raise HTTPException(403, 'Memery management permission required')
+        state = request.app.state
+        auth = state.auth_manager
+        account = auth.account_id(owner)
+        try:
+            credential = state.capture_original_credential(request, owner, account)
+            path = db_path_resolver() if db_path_resolver else db_path
+            service = GeneralHexGuidance(prepare_hex_authority(path))
+        except Exception as exc:
+            raise HTTPException(503, 'Guidance review authority unavailable') from exc
+        def current():
+            prefs = _load_for_user(owner)
+            return (credential() is True and auth.get_privileges(owner).get('can_manage_memory') is True
+                    and prefs.get('memory_enabled') is not False and memory_mode(prefs) != 'off'
+                    and (db_path_resolver is None or str(db_path_resolver()) == str(path)))
+        if not current():
+            raise HTTPException(403, 'Memery review is disabled for this account')
+        return service, owner, account, current
+
+    def guidance_call(operation, *args, **kwargs):
+        try:
+            return operation(*args, **kwargs)
+        except GeneralHexConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except GeneralHexNotFound as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except (GeneralHexError, TypeError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @router.get('/guidance/evidence')
+    def guidance_evidence(request: Request, workspace_id: str | None = None, search: str = '', limit: int = 100, offset: int = 0):
+        service, owner, account, current = guidance_context(request)
+        result = guidance_call(service.evidence, owner, workspace_id, account_id=account, search=search, limit=limit, offset=offset)
+        if not current():
+            raise HTTPException(403, 'Memery review authority changed')
+        return result
+
+    @router.get('/guidance/proposals')
+    def pending_guidance(request: Request, limit: int = 100, offset: int = 0):
+        service, owner, account, current = guidance_context(request)
+        result = guidance_call(service.pending, owner, account, limit=limit, offset=offset)
+        if not current():
+            raise HTTPException(403, 'Memery review authority changed')
+        return result
+
+    @router.post('/guidance/proposals')
+    def propose_guidance(request: Request, payload: dict = Body(...)):
+        service, owner, account, current = guidance_context(request)
+        values = fields(payload, ('hex_id','expected_revision','action','reason','evidence_ids','workspace_id','parent_ids','tags','body'))
+        return guidance_call(service.propose, owner, account_id=account, actor='owner', current=current, **values)
+
+    @router.post('/guidance/proposals/{draft_id}/{decision}')
+    def decide_guidance(request: Request, draft_id: str, decision: str):
+        if decision not in ('accept', 'reject'):
+            raise HTTPException(404, 'Unknown review decision')
+        service, owner, account, current = guidance_context(request)
+        return guidance_call(service.decide, owner, account, draft_id, accept=decision == 'accept', current=current)
+
+    from routes.general_hex_scan import register_guidance_scan
+    register_guidance_scan(router, guidance_context)
     return router

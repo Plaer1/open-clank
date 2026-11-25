@@ -38,6 +38,50 @@ export function mountChatContextInspector(container, getChatID) {
           const identity = document.createElement('p');
           identity.textContent = `Session ${frame.identity.sessionID}${frame.identity.actorID ? ` · actor ${frame.identity.actorID}` : ''}${frame.identity.executionRevision != null ? ` · execution ${frame.identity.executionRevision}` : ''}${frame.identity.rootOperationID ? ` · operation ${frame.identity.rootOperationID}` : ''}${frame.identity.innerTurnID ? ` · turn ${frame.identity.innerTurnID}` : ''}`;
           section.append(identity);
+          const profile = document.createElement('details');
+          const heading = document.createElement('summary');
+          heading.textContent = 'Persona, guidance and Memery';
+          profile.append(heading);
+          if (frame.profile) {
+            for (const [key, label] of [['personaInstructions', 'Persona and host instructions'], ['standingGuidance', 'Standing guidance'], ['recalledMemery', 'Recalled Memery']]) {
+              const row = document.createElement('p');
+              const digest = frame.profile[key];
+              row.textContent = digest ? `${label} · matched in this frame · SHA-256 ${digest}` : `${label} · no verified match`;
+              profile.append(row);
+              if (key === 'personaInstructions' && digest) {
+                const check = document.createElement('button');
+                check.type = 'button';
+                check.textContent = 'Compare current default persona';
+                check.addEventListener('click', async () => {
+                  const stillCurrent = () => check.isConnected && !disposed && current === epoch && chat === getChatID() && owner === account();
+                  if (!stillCurrent()) return;
+                  check.disabled = true;
+                  let preview = 'Current default persona does not match this frame.';
+                  try {
+                    const response = await fetch('/api/presets/default-persona', {credentials:'same-origin',cache:'no-store'});
+                    if (!response.ok) throw Error();
+                    const {name, system_prompt} = await response.json();
+                    if (typeof name !== 'string' || typeof system_prompt !== 'string' || !system_prompt || system_prompt.length > 20000) throw Error();
+                    const text = `Your name is ${name}. ${system_prompt}`;
+                    const {sha256Hex} = await import('./knowledgeSnapshotBundle.js');
+                    for (const value of [text, system_prompt]) {
+                      if (await sha256Hex(new TextEncoder().encode(value)) === digest) {
+                        preview = `Matching current persona · ${value}`;
+                        break;
+                      }
+                    }
+                  } catch { preview = 'Current persona comparison unavailable.'; }
+                  if (stillCurrent()) { row.textContent = preview; check.disabled = false; }
+                });
+                profile.append(check);
+              }
+            }
+          } else {
+            const row = document.createElement('p');
+            row.textContent = 'This frame has no profile evidence.';
+            profile.append(row);
+          }
+          section.append(profile);
           for (const [name, component] of Object.entries(frame.components)) {
             const entry = document.createElement('p'); entry.textContent = `${name}: ${component.state}${component.digest ? ` · ${component.digest}` : ''}`; section.append(entry);
           }

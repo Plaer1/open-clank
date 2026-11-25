@@ -14,6 +14,41 @@ def _reply(state, text, receipt=None):
     return {"state": state, "text": text[:131072], **({"operationID": receipt} if receipt else {})}
 
 
+def _guidance(provider, owner, account, workspace, boundary, arguments, current):
+    """The model may inspect its applied rules and draft a change for owner review."""
+    from src.general_hex_guidance import GeneralHexGuidance
+    from src.general_hex_library import GeneralHexConflict, GeneralHexError
+    from src.general_hex_runtime import active_hex_db_path
+
+    path = active_hex_db_path(provider)
+    if not path or not workspace:
+        return _reply("unavailable", "The turn has no scoped guidance store.")
+    service = GeneralHexGuidance(path)
+    try:
+        # Do not create a new snapshot when the original turn had none.
+        with service.repo._connection() as conn:
+            row = conn.execute(
+                "SELECT snapshot_json FROM fm_general_hex_snapshots WHERE owner_id=? AND boundary_id=?",
+                (owner, boundary),
+            ).fetchone()
+        if not row:
+            return _reply("unavailable", "The turn has no saved guidance snapshot.")
+        rules = [{key: item[key] for key in ("hex_id", "revision", "title")}
+                 for item in json.loads(row[0])["entries"] if item["state"] == "included"]
+        if arguments["action"] == "guidance_context":
+            evidence = service.evidence(owner, workspace, limit=20, search=arguments.get("query", "")) if rules else {"items":[]}
+            return _reply("complete", json.dumps({"rules": rules, "evidence": evidence["items"]}, ensure_ascii=False))
+        if not any(r["hex_id"] == arguments["hex_id"] and r["revision"] == arguments["expected_revision"] for r in rules):
+            raise GeneralHexConflict("Choose a rule and revision from this turn’s guidance context.")
+        draft = service.propose(owner, account_id=account, workspace_id=workspace,
+            hex_id=arguments["hex_id"], expected_revision=arguments["expected_revision"], action=arguments["change"],
+            reason=arguments["reason"], evidence_ids=arguments["evidence_ids"], body=arguments.get("body"),
+            actor="assistant", current=current)
+        return _reply("complete", json.dumps({"draft_id": draft["draft_id"], "pending_review": True}))
+    except GeneralHexError as exc:
+        return _reply("rejected", str(exc))
+
+
 async def _perform(store, *, identity, account, chat, owner, model_route, arguments, current, execute):
     """A pending durable reservation is never reissued after cancellation or restart."""
     action = arguments["action"]
@@ -133,6 +168,30 @@ async def manage(bridge, request):
             action = arguments["action"]
             if prefs.get("memory_enabled") is False or memory_mode(prefs) == "off":
                 return unavailable
+            if action in {"guidance_context", "propose_guidance"}:
+                from src.openclank.memery_preferences import owner_preferences
+                workspace = binding.get("memoryWorkspaceID")
+                if not workspace or not owner_preferences(owner)["memery_agent_search_enabled"]:
+                    return unavailable
+
+                # Recheck the live turn inside the draft transaction, immediately before
+                # commit. The model cannot supply workspace, account, or actor authority.
+                loop = asyncio.get_running_loop()
+                def still_current():
+                    proof = asyncio.run_coroutine_threadsafe(current(), loop)
+                    try:
+                        return proof.result(timeout=5) and owner_preferences(owner)["memery_agent_search_enabled"]
+                    finally:
+                        proof.cancel()
+
+                work = asyncio.create_task(asyncio.to_thread(_guidance, provider, owner, account, workspace,
+                    identity["rootOperationID"], arguments, still_current))
+                try:
+                    result = await asyncio.shield(work)
+                except asyncio.CancelledError:
+                    await work
+                    raise
+                return result if await current() and owner_preferences(owner)["memery_agent_search_enabled"] else unavailable
             if action in {"edit", "resolve", "delete"}:
                 allowed, reason = write_allowed(prefs)
                 if not allowed:

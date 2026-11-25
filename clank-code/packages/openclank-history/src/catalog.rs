@@ -2513,6 +2513,16 @@ pub struct MemeryReference {
     pub evidence: bool,
 }
 
+/// Preserve existing on-disk keys and wire values (false = records, true = assets).
+/// Guidance needs its own cursor because Hex revisions have their own SQLite rowids.
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MemeryCollection {
+    #[serde(rename = "guidance")]
+    Guidance,
+    #[serde(untagged)]
+    RecordsOrAssets(bool),
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemeryManifest {
     pub generation: u64,
@@ -2522,15 +2532,15 @@ pub struct MemeryManifest {
 }
 
 impl Catalog {
-    pub fn memery_manifest(&self, account: &str, assets: bool) -> CatalogResult<MemeryManifest> {
+    pub fn memery_manifest(&self, account: &str, collection: MemeryCollection) -> CatalogResult<MemeryManifest> {
         let read = self.db.begin_read()?;
         let table = read.open_table(MEMERY)?;
-        let key = serde_json::to_string(&(account, assets))?;
+        let key = serde_json::to_string(&(account, collection))?;
         let raw = table.get(key.as_str())?;
         Ok(raw.map(|v| serde_json::from_slice(v.value())).transpose()?.unwrap_or_default())
     }
 
-    pub fn settle_memery(&self, account: &str, assets: bool, checkpoint: bool, generation: u64, position: u64, witness: String,
+    pub fn settle_memery(&self, account: &str, collection: MemeryCollection, checkpoint: bool, generation: u64, position: u64, witness: String,
         add: Vec<MemeryReference>, remove: Vec<String>) -> CatalogResult<MemeryManifest> {
         let digest = |s: &str| s.len() == 64 && s.bytes().all(|v| v.is_ascii_hexdigit());
         if add.len() > 32 || remove.len() > 256 || (position != 0 && !digest(&witness))
@@ -2551,7 +2561,7 @@ impl Catalog {
         let now = chrono::Utc::now().timestamp_millis() as u64;
         let earliest = now.saturating_sub(policy.max_age_days.unwrap_or(u64::MAX).saturating_mul(86_400_000));
         let mut table = write.open_table(MEMERY)?;
-        let key = serde_json::to_string(&(account, assets))?;
+        let key = serde_json::to_string(&(account, collection))?;
         let mut state: MemeryManifest = table.get(key.as_str())?.map(|v| serde_json::from_slice(v.value()))
             .transpose()?.unwrap_or_default();
         let original = state.clone();
@@ -2565,7 +2575,8 @@ impl Catalog {
                 || !digest(&item.change) || !digest(&item.digest) || item.revision == 0 || item.at > now {
                 return Err("invalid Memery revision".into());
             }
-            let enabled = if assets { policy.memery_artifacts }
+            let enabled = if collection == MemeryCollection::Guidance { policy.memery_records }
+                else if collection == MemeryCollection::RecordsOrAssets(true) { policy.memery_artifacts }
                 else if item.evidence { policy.memery_evidence } else { policy.memery_records };
             if !policy.enabled || !enabled || item.at < earliest
                 || (!checkpoint && (policy.frequency == "manual" || item.at <= epoch)) { continue; }
@@ -2593,5 +2604,46 @@ impl Catalog {
         drop(policies);
         write.commit()?;
         Ok(state)
+    }
+}
+
+#[cfg(test)]
+mod guidance_history_tests {
+    use super::*;
+
+    #[test]
+    fn guidance_has_an_independent_cursor_and_obeys_record_capture_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog = Catalog::open(temp.path().join("catalog.redb"), "account").unwrap();
+        let stream = MemeryCollection::Guidance;
+        for (wire, kind) in [("false", MemeryCollection::RecordsOrAssets(false)),
+                            ("true", MemeryCollection::RecordsOrAssets(true)), ("\"guidance\"", stream)] {
+            assert_eq!(serde_json::from_str::<MemeryCollection>(wire).unwrap(), kind);
+            assert_eq!(serde_json::to_string(&kind).unwrap(), wire);
+        }
+
+        let mut policy = catalog.policy_set().unwrap();
+        policy.capture_defaults.frequency = "manual".into();
+        let policy = catalog.set_policy(policy.revision, policy).unwrap();
+        let revision = MemeryReference { block: "profile-rule".into(), revision: 1,
+            change: "a".repeat(64), digest: "b".repeat(64), at: 100, evidence: false };
+        let settle = |generation, checkpoint| catalog.settle_memery("account", stream,
+            checkpoint, generation, 1, "a".repeat(64), vec![revision.clone()], vec![]).unwrap();
+        let scanned = settle(0, false);
+        assert!(scanned.entries.is_empty());
+        let records = catalog.memery_manifest("account", MemeryCollection::RecordsOrAssets(false)).unwrap();
+        assert_eq!(records.position, 0);
+        let saved = settle(scanned.generation, true);
+        assert_eq!(saved.entries, vec![revision.clone()]);
+        assert_eq!(settle(saved.generation, true), saved);
+
+        let mut policy = policy;
+        policy.capture_defaults.memery_records = false;
+        catalog.set_policy(policy.revision, policy).unwrap();
+        let other = MemeryReference { revision: 2, change: "c".repeat(64), ..revision };
+        let excluded = catalog.settle_memery("account", stream, true, saved.generation, saved.position,
+            saved.witness, vec![other], vec![]).unwrap();
+        assert_eq!(excluded.entries, saved.entries);
+        assert!(catalog.memery_manifest("other", stream).unwrap().entries.is_empty());
     }
 }

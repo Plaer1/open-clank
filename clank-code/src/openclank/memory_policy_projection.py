@@ -347,25 +347,26 @@ class _RankPreparationProof:
 class PolicyTransitionCoordinator:
     """Host-owned preference transition; SQLite fence precedes preference lock."""
 
-    def __init__(self, projection: PolicyProjection, *, resolve, fingerprint, assert_current):
+    def __init__(self, projection: PolicyProjection, *, resolve, fingerprint, assert_current, previous_default=None):
         if type(projection) is not PolicyProjection or not all(callable(x) for x in (resolve, fingerprint, assert_current)):
             raise ValueError('policy transition authority unavailable')
         self.projection, self.resolve, self.fingerprint, self.assert_current = projection, resolve, fingerprint, assert_current
+        self._previous_default = previous_default
         self._lock = threading.Lock()
         self._local = threading.local()
         # Only fences created by this coordinator may be resumed after a failed ready CAS.
         self._initializing = {}
 
-    def qualify_initial(self, account, target, read_snapshot, get_fingerprint, *, global_scope=False, check_target=None):
+    def qualify_initial(self, account, target, read_snapshot, get_fingerprint, *, global_scope=False, check_target=None, user=None):
         """Complete only this process's exact original initialization fence."""
         if not self._lock.acquire(blocking=False):
             raise PolicyTransitionUnavailable('policy transition busy')
         try:
-            self._qualify_initial_locked(account, target, read_snapshot, get_fingerprint, global_scope, check_target)
+            self._qualify_initial_locked(account, target, read_snapshot, get_fingerprint, global_scope, check_target, user)
         finally:
             self._lock.release()
 
-    def _qualify_initial_locked(self, account, target, read_snapshot, get_fingerprint, global_scope, check_target):
+    def _qualify_initial_locked(self, account, target, read_snapshot, get_fingerprint, global_scope, check_target, user=None):
         self.assert_current()
         if check_target is not None and check_target() is not True:
             raise ValueError('policy target changed')
@@ -382,6 +383,10 @@ class PolicyTransitionCoordinator:
             pending = (dict(row), snapshot, fingerprint)
             self._initializing[scope] = pending
         if row['state'] == 'ready':
+            if pending is None and not global_scope and user and row['fingerprint'] != fingerprint:
+                migrated = self._upgrade_previous_default(user, account, target, row, before, read_snapshot)
+                if migrated is not None:
+                    return migrated
             if pending is not None or row['fingerprint'] != fingerprint:
                 if pending is None:
                     self.projection.fence(account, target, row, global_scope=global_scope)
@@ -399,9 +404,27 @@ class PolicyTransitionCoordinator:
         del self._initializing[scope]
         return ready
 
+    def _upgrade_previous_default(self, user, account, target, row, prefs, read_snapshot):
+        # No host file is being edited: a single ready→ready CAS with a fresh
+        # epoch invalidates old permits and survives interruption at commit.
+        if self._previous_default is None or row['state'] != 'ready':
+            return None
+        old = self._previous_default(user, prefs)
+        if old is None or old != row['fingerprint']:
+            return None
+        new = self.fingerprint(user, prefs)
+        fresh = read_snapshot()
+        if (new == old or self.resolve(user) != (account,target)
+                or self.fingerprint(user, fresh) != new or self._previous_default(user, fresh) != old):
+            raise ValueError('policy changed during default migration')
+        self.assert_current()
+        migrated = {**row, 'epoch': row['epoch'] + 1, 'transition_id': secrets.token_hex(32), 'fingerprint': new}
+        self.projection._transition(account, target, row, migrated)
+        return migrated
+
     def _account_row_for_transition(self, user, account, target):
         row = self.projection.read_scope(account, target)
-        if row is not None:
+        if row is not None and (row['state'] != 'ready' or self._previous_default is None):
             return row
         # Account creation wakes the registry asynchronously. An authorized
         # first write may precede that wake. Qualify the canonical snapshot
@@ -412,6 +435,11 @@ class PolicyTransitionCoordinator:
             with PREFERENCE_LOCK:
                 return copy.deepcopy(_load_for_user(user))
 
+        if row is not None:
+            prefs = read_preferences()
+            if row['fingerprint'] == self.fingerprint(user, prefs):
+                return row
+            return self._upgrade_previous_default(user, account, target, row, prefs, read_preferences) or row
         return self._qualify_initial_locked(
             account, target, read_preferences, lambda prefs: self.fingerprint(user, prefs),
             False, lambda: self.resolve(user) == (account, target))
@@ -421,8 +449,14 @@ class PolicyTransitionCoordinator:
         self.assert_current()
         if self.resolve(user) != (account, target):
             raise ValueError('policy target changed')
-        if self.projection.read_scope(account, target) is not None:
+        row = self.projection.read_scope(account, target)
+        if row is not None and (row['state'] != 'ready' or self._previous_default is None):
             return
+        if row is not None:
+            from routes.prefs_routes import PREFERENCE_LOCK, _load_for_user
+            with PREFERENCE_LOCK:
+                if row['fingerprint'] != self._previous_default(user, _load_for_user(user)):
+                    return
         if not self._lock.acquire(blocking=False):
             raise PolicyTransitionUnavailable('policy transition busy')
         try:

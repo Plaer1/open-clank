@@ -30,13 +30,14 @@ function field(label, type = 'input', value = '') {
   if (type === 'textarea') input.rows = 3;
   wrap.append(input); return { wrap, input };
 }
-async function api(path, options = {}) {
-  const response = await fetch('/api/hexes' + path, { credentials: 'same-origin', ...options,
+async function request(path, options = {}) {
+  const response = await fetch(path, { credentials: 'same-origin', ...options,
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
   const value = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(typeof value.detail === 'string' ? value.detail : `Hex action failed (${response.status})`);
   return value;
 }
+const api = (path, options) => request('/api/hexes' + path, options);
 const payload = value => ({ method: 'POST', body: JSON.stringify(value) });
 
 export function mountGeneralHexLibrary(root) {
@@ -65,7 +66,13 @@ export function mountGeneralHexLibrary(root) {
   toolbar.append(projectSearch.wrap, project, projectPages, refresh, create, importButton, importInput);
   const tabs = node('div', '', 'hex-toolbar');
   const library = node('section', '', 'hex-library'); const workspace = node('section', '', 'hex-workspace'); workspace.hidden = true;
-  tabs.append(button('General', () => { library.hidden = false; workspace.hidden = true; }), button('Workspace', () => { library.hidden = true; workspace.hidden = false; }));
+  const review = node('section', '', 'hex-library'); review.hidden = true;
+  function showSection(section) {
+    editor.hidden = true;
+    for (const pane of [library, workspace, review]) pane.hidden = pane !== section;
+  }
+  tabs.append(button('General', () => showSection(library)), button('Workspace', () => showSection(workspace)),
+    button('Review', () => run(async () => { showSection(review); await loadReview(); }), 'preview'));
   const search = field('Search your General library'); search.input.type = 'search';
   const filter = field('Filter by one tag (does not change context tags)');
   const filters = node('div', '', 'hex-toolbar'); filters.append(search.wrap, filter.wrap, button('Search', () => { state.offset = 0; run(load); }));
@@ -87,7 +94,7 @@ export function mountGeneralHexLibrary(root) {
   contextFields.append(workspaceTags.wrap, taskTags.wrap, saveContext);
   const explain = node('div'); const pinned = node('div', '', 'hex-pinned');
   preview.append(tagHint, contextFields, explain, pinned);
-  const columns = node('div', '', 'hex-columns'); const main = node('div'); main.append(tabs, library, workspace, editor); columns.append(main, preview);
+  const columns = node('div', '', 'hex-columns'); const main = node('div'); main.append(tabs, library, workspace, review, editor); columns.append(main, preview);
   root.replaceChildren(heading, lead, toolbar, status, columns);
 
   async function run(action) {
@@ -134,6 +141,8 @@ export function mountGeneralHexLibrary(root) {
     if (generation !== state.generation) return;
     state.entries = entries.entries; state.preview = composition;
     renderEntries(); renderPreview();
+    if (!review.hidden) await loadReview();
+    if (generation !== state.generation) return;
     paging.replaceChildren();
     if (state.offset) paging.append(button('Previous', () => { state.offset = Math.max(0, state.offset - 25); run(load); }));
     if (entries.next_offset != null) paging.append(button('Next', () => { state.offset = entries.next_offset; run(load); }));
@@ -165,10 +174,203 @@ export function mountGeneralHexLibrary(root) {
       const applicability = !entry.tags.length ? 'Global' : 'Experimental · ' + entry.tags.join(' · ');
       row.append(title, node('p', `${applicability} · revision ${entry.revision} · ${entry.enabled ? 'enabled' : 'disabled'}${entry.accepted ? '' : ' · awaiting acceptance'}`, 'settings-hint'));
       const actions = node('div', '', 'hex-toolbar');
-      actions.append(button(entry.enabled ? 'Disable' : 'Enable', () => run(async () => { await api('/general/' + entry.hex_id, { method: 'PATCH', body: JSON.stringify({ expected_revision: entry.revision, enabled: !entry.enabled }) }); await load(); })), button('History', () => run(() => history(entry))), button('Export', () => { const link = node('a'); link.href = `/api/hexes/general/${entry.hex_id}/export?revision=${entry.revision}`; link.download = ''; link.click(); }), button('Apply to workspace', () => application(entry)));
+      const retired = entry.provenance?.guidance?.action === 'retire' && !entry.enabled;
+      if (!retired) actions.append(button(entry.enabled ? 'Disable' : 'Enable', () => run(async () => { await api('/general/' + entry.hex_id, { method: 'PATCH', body: JSON.stringify({ expected_revision: entry.revision, enabled: !entry.enabled }) }); await load(); })));
+      actions.append(button('History', () => run(() => history(entry))), button('Export', () => { const link = node('a'); link.href = `/api/hexes/general/${entry.hex_id}/export?revision=${entry.revision}`; link.download = ''; link.click(); }), button('Apply to workspace', () => application(entry)));
       if (!entry.accepted) actions.append(button('Accept reviewed revision', () => run(async () => { await api(`/general/${entry.hex_id}/accept`, payload({ expected_revision: entry.revision })); await load(); })));
+      if (entry.accepted && (entry.enabled || retired)) {
+        actions.append(button('Create draft', () => propose(entry), 'edit'));
+      }
+      if (retired) {
+        row.append(node('strong', 'Archived'));
+      }
       row.append(actions); list.append(row);
     }
+  }
+  // All proposal text and source labels belong to the owner, including strings that
+  // happen to match a translated UI control.
+  function ownerText(tag, value) {
+    const el = node(tag, value);
+    el.dataset.userContent = 'true';
+    return el;
+  }
+  function propose(entry, scanResult = null) {
+    const scope = scanResult?.workspace_id || state.activeWorkspaceId;
+    const form = node('form');
+    editor.replaceChildren(form); editor.hidden = false;
+    const action = field('Action', 'select'); action.input.setAttribute('aria-label', 'Action');
+    for (const [value, label] of (entry.enabled ? [['revise', 'Edit'], ['retire', 'Archive']] : [['revise', 'Enable']])) {
+      const option = node('option', label); option.value = value; action.input.append(option);
+    }
+    const body = field('After', 'textarea', entry.body);
+    const reason = field('Reason for review', 'textarea');
+    reason.input.required = true;
+    const evidence = new Set(scanResult ? [scanResult.evidence_id] : []);
+    const parents = new Set(entry.provenance?.guidance?.parent_ids || []);
+    const tags = field('Tags — Experimental (one label per line)', 'textarea', entry.tags.join('\n'));
+    const submit = button('Save draft', () => {}, 'save'); submit.type = 'submit';
+    const originalParents = new Set(parents);
+    function checkReady() {
+      const revise = action.input.value === 'revise';
+      body.wrap.hidden = tags.wrap.hidden = parentChoices.hidden = !revise;
+      const parentsChanged = parents.size !== originalParents.size || [...parents].some(id => !originalParents.has(id));
+      const tagsChanged = JSON.stringify(labels(tags.input.value)) !== JSON.stringify(entry.tags);
+      const hasChange = !entry.enabled || body.input.value.trim() !== entry.body.trim() || parentsChanged || tagsChanged;
+      submit.disabled = !evidence.size || !reason.input.value.trim() || (revise && (!body.input.value.trim() || !hasChange));
+    }
+    function choices(caption, chosen, page) {
+      const details = node('details'); details.append(node('summary', caption));
+      const rows = node('div'); details.append(rows);
+      const more = button('Load more', () => run(next)); details.append(more);
+      let offset = 0, loaded = false, loading = false;
+      async function next() {
+        if (loading || offset === null) return;
+        loading = true; more.disabled = true;
+        try {
+          const result = await page(offset);
+          if (!form.isConnected) return;
+          for (const item of result.items) {
+            const label = node('label');
+            label.className = 'hex-disposition'; label.style.display = 'block';
+            const input = node('input'); input.type = 'checkbox'; input.checked = chosen.has(item.id);
+            input.addEventListener('change', () => {
+              if (input.checked && chosen.size >= 16) {
+                input.checked = false; status.textContent = 'Maximum: 16'; return;
+              }
+              if (input.checked) chosen.add(item.id); else chosen.delete(item.id);
+              checkReady();
+            });
+            label.append(input, ownerText('span', item.label)); rows.append(label);
+          }
+          loaded = true; offset = result.next_offset ?? null; more.hidden = offset === null;
+          if (!rows.childElementCount && offset === null) rows.append(node('p', 'No items', 'settings-hint'));
+        } finally { loading = false; more.disabled = false; }
+      }
+      details.addEventListener('toggle', () => { if (details.open && !loaded) run(next); });
+      return details;
+    }
+    const evidenceChoices = choices('Evidence', evidence, offset =>
+      api('/guidance/evidence?' + new URLSearchParams({...(scope && {workspace_id: scope}), offset, limit: 25})));
+    const parentChoices = choices('Parent', parents, async offset => {
+      const result = await api('/general?' + new URLSearchParams({offset, limit: 25}));
+      return {items: result.entries.filter(item => item.hex_id !== entry.hex_id && item.enabled && item.accepted)
+        .map(item => ({id: item.hex_id, label: item.title})), next_offset: result.next_offset};
+    });
+    const actions = node('div', '', 'hex-toolbar');
+    actions.append(submit, button('Cancel', () => { editor.hidden = true; }));
+    form.append(ownerText('h3', entry.title), node('strong', 'Current'), ownerText('pre', entry.body),
+      action.wrap, body.wrap, reason.wrap, node('span', 'Workspace'), scope ? ownerText('code', scope) : node('span', 'Default'),
+      evidenceChoices, parentChoices, tags.wrap, actions);
+    if (scanResult) evidenceChoices.querySelector('summary').after(ownerText('p', scanResult.evidence_label));
+    form.querySelector('pre').className = 'hex-source';
+    form.addEventListener('input', checkReady); checkReady();
+    evidenceChoices.open = true;
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      if (submit.disabled) return;
+      const change = {hex_id: entry.hex_id, expected_revision: entry.revision, action: action.input.value,
+        reason: reason.input.value.trim(), evidence_ids: [...evidence], ...(scope && {workspace_id: scope})};
+      if (change.action === 'revise') Object.assign(change, {body:body.input.value.trim(), parent_ids:[...parents], tags:labels(tags.input.value)});
+      submit.disabled = true;
+      run(async () => {
+        try {
+          await api('/guidance/proposals', payload(change));
+          if (form.isConnected && !editor.hidden) { showSection(review); await loadReview(); }
+        } finally { checkReady(); }
+      });
+    });
+    action.input.focus();
+  }
+  let reviewGeneration = 0;
+  async function loadReview(offset = 0) {
+    const generation = ++reviewGeneration;
+    review.replaceChildren();
+    const data = await api('/guidance/proposals?' + new URLSearchParams({offset, limit:25}));
+    if (generation !== reviewGeneration || review.hidden) return;
+    const scan = node('section');
+    const scope = state.activeWorkspaceId;
+    const results = node('div');
+    const coverage = node('p', '', 'settings-hint');
+    let checkedSources = 0, unlinkedRules = 0, unavailableSources = 0;
+    async function scanSources(after = '') {
+      const query = new URLSearchParams(scope ? {workspace_id: scope} : {});
+      if (after) query.set('after', after);
+      const data = await api('/guidance/scan?' + query);
+      if (!scan.isConnected || review.hidden || generation !== reviewGeneration) return;
+      const next = results.querySelector('button[data-next]');
+      next?.remove();
+      if (!after) {
+        results.replaceChildren();
+        checkedSources = unlinkedRules = unavailableSources = 0;
+      }
+      checkedSources += data.coverage.checked_sources;
+      unlinkedRules += data.coverage.unlinked;
+      unavailableSources += data.coverage.unavailable_sources;
+      coverage.replaceChildren(node('span', 'Coverage'), ' · ', node('span', 'checked'), ' ' + checkedSources,
+        ' · ', node('span', 'No evidence'), ' ' + unlinkedRules, ' · ', node('span', 'Evidence unavailable'), ' ' + unavailableSources);
+      for (const item of data.items) {
+        const row = node('article', '', 'hex-entry');
+        row.append(ownerText('h4', item.title), node('p', 'Shared resource changed.'),
+          ownerText('p', item.evidence_label), button('Create draft', () => run(async () => {
+            const entry = await api('/general/' + encodeURIComponent(item.hex_id));
+            if (!row.isConnected || review.hidden) return;
+            if (entry.revision !== item.expected_revision) throw new Error('The evidence or review context changed. Compare again.');
+            propose(entry, item);
+          })));
+        results.append(row);
+      }
+      if (data.next_cursor) {
+        const more = button('Load more', () => run(async () => {
+          more.disabled = true;
+          try { await scanSources(data.next_cursor); } finally { more.disabled = false; }
+        }));
+        more.dataset.next = 'true'; results.append(more);
+      } else if (!results.childElementCount) results.append(node('p', 'No matching evidence', 'settings-hint'));
+    }
+    const scanButton = button('Refresh to review current evidence.', () => run(async () => {
+      scanButton.disabled = true;
+      try { await scanSources(); } finally { scanButton.disabled = false; }
+    }), 'refresh');
+    scan.append(scanButton, coverage, results);
+    review.replaceChildren(node('h3', 'Evidence review'), scan);
+    if (!data.proposals.length) review.append(node('p', 'No items', 'hex-empty'));
+    for (const item of data.proposals) {
+      const card = node('article', '', 'hex-entry');
+      const before = ownerText('pre', item.before); before.className = 'hex-source';
+      card.append(ownerText('h4', item.title), node('strong', 'Current'), before);
+      if (item.action === 'retire') card.append(node('strong', 'Archive'));
+      else {
+        if (item.reactivate) card.append(node('strong', 'Enable'));
+        const after = ownerText('pre', item.after); after.className = 'hex-source';
+        card.append(node('strong', 'After'), after);
+      }
+      card.append(node('strong', 'Reason'), ownerText('p', item.reason),
+        node('strong', 'Workspace'), ownerText('p', item.workspace_id), node('strong', 'Evidence'));
+      const sources = node('ul');
+      for (const evidence of item.evidence) {
+        const source = ownerText('li', evidence.label); source.append(' ', ownerText('code', evidence.id)); sources.append(source);
+      }
+      card.append(sources);
+      if (item.parent_ids?.length) card.append(node('strong', 'Parent'), ownerText('p', item.parent_ids.join(' · ')));
+      card.append(node('strong', 'Tags'), item.tags?.length ? ownerText('p', item.tags.join(' · ')) : node('p', 'Global'));
+      const actions = node('div', '', 'hex-toolbar');
+      const decide = decision => run(async () => {
+        for (const control of actions.children) control.disabled = true;
+        try { await api('/guidance/proposals/' + encodeURIComponent(item.draft_id) + '/' + decision, {method:'POST'}); await load(); }
+        finally { for (const control of actions.children) control.disabled = control === accept && item.stale_evidence; }
+      });
+      const accept = button('Accept change', () => decide('accept'), 'check');
+      if (item.stale_evidence) {
+        accept.disabled = true;
+        card.append(node('p', 'The evidence or review context changed. Compare again.', 'hex-status'));
+      }
+      actions.append(accept, button('Reject change', () => decide('reject'), 'close'));
+      card.append(actions); review.append(card);
+    }
+    const pages = node('div', '', 'hex-toolbar');
+    if (offset) pages.append(button('Previous', () => run(() => loadReview(Math.max(0, offset - 25)))));
+    if (data.next_offset != null) pages.append(button('Next', () => run(() => loadReview(data.next_offset))));
+    review.append(pages);
   }
   function renderPreview() {
     const contexts = state.preview.context_tags;
@@ -280,7 +482,27 @@ export function mountGeneralHexLibrary(root) {
   }
   async function history(entry, offset = 0) {
     const data = await api(`/general/${entry.hex_id}/history?limit=25&offset=${offset}`); editor.hidden = false; editor.replaceChildren(node('h3', 'Revision history · ' + entry.title));
-    data.revisions.forEach(revision => { const row = node('article', '', 'hex-entry'); row.append(node('p', `Revision ${revision.revision} · ${revision.created_at}`), node('pre', revision.body, 'hex-source'), button('Restore as a new revision', () => run(async () => { await api(`/general/${entry.hex_id}/restore`, payload({ revision: revision.revision, expected_revision: entry.revision })); editor.hidden = true; await load(); }))); editor.append(row); });
+    data.revisions.forEach(revision => {
+      const row = node('article', '', 'hex-entry');
+      row.append(node('p', `Revision ${revision.revision} · ${revision.created_at}`),
+        node('pre', revision.body, 'hex-source'), button('Restore as a new revision', () => run(async () => {
+          await api(`/general/${entry.hex_id}/restore`, payload({ revision: revision.revision, expected_revision: entry.revision }));
+          editor.hidden = true; await load();
+        })));
+      if (revision.accepted && !revision.deleted && !entry.deleted) {
+        const receipt = node('span', '', 'settings-hint'); receipt.setAttribute('role', 'status');
+        const checkpoint = button('Save checkpoint', () => run(async () => {
+          checkpoint.disabled = true;
+          try {
+            const result = await request(`/api/history/memery/guidance/${encodeURIComponent(entry.hex_id)}/versions/${revision.revision}/checkpoint`, {method: 'POST'});
+            if (result.recorded !== true || result.revision !== revision.revision) throw new Error('Checkpoint unavailable.');
+            receipt.textContent = 'Checkpoint saved';
+          } finally { checkpoint.disabled = Boolean(receipt.textContent); }
+        }), 'save');
+        row.append(checkpoint, receipt);
+      }
+      editor.append(row);
+    });
     const pages = node('div', '', 'hex-toolbar');
     if (offset) pages.append(button('Newer revisions', () => run(() => history(entry, Math.max(0, offset - 25)))));
     if (data.next_offset != null) pages.append(button('Older revisions', () => run(() => history(entry, data.next_offset))));
@@ -316,8 +538,7 @@ export function mountGeneralHexLibrary(root) {
     state.projectExplicit = !!state.activeWorkspaceId;
     editor.hidden = true;
     workspace.replaceChildren(node('p', 'Loading workspace contract…', 'settings-hint'));
-    library.hidden = !!state.activeWorkspaceId;
-    workspace.hidden = !state.activeWorkspaceId;
+    showSection(state.activeWorkspaceId ? workspace : library);
     run(load);
   });
   run(load);

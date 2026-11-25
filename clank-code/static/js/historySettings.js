@@ -118,7 +118,7 @@
           if (!isCurrent()) return;
           for (const item of page.items) {
             const row = document.createElement("p");
-            const labels = { memery_records: "Record", memery_evidence: "Evidence", memery_artifacts: "Artifact" };
+            const labels = { general_hex: "General Hex", memery_records: "Record", memery_evidence: "Evidence", memery_artifacts: "Artifact" };
             row.append(`${labels[item.category] || "Memery"} · ${item.resource_id} · revision ${item.revision} · ${new Date(item.recorded_at_millis).toLocaleString()} `);
             const url = new URL(item.detail_url, location.origin);
             const allowedPath = item.category === "memery_artifacts" ? "/api/memory/assets/" : "/api/history/memery/";
@@ -139,6 +139,10 @@
                     const response = await fetch(url, { signal: abort.signal });
                     if (!response.ok) throw Error();
                     const detail = await response.json();
+                    if (item.category === "general_hex" && detail.revision === item.revision) {
+                      if (isCurrent()) view.replaceWith(document.createTextNode(detail.title + " · " + detail.body));
+                      return;
+                    }
                     const revision = detail.history?.find(entry => entry.revision === item.revision);
                     if (isCurrent()) view.replaceWith(document.createTextNode(
                       revision?.history_reference === "retained" ? revision.text : "This recorded revision is unavailable."

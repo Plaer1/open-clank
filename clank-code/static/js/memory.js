@@ -1,3 +1,4 @@
+import { saveExplicitMemory, memoryAddMessage } from './explicitMemory.js';
 import { bindCardActionMenu } from './cardActionMenu.js';
 import { recordPresentation } from './achievementProducer.js';
 import { uiIcon } from './uiIcons.js';
@@ -1367,10 +1368,6 @@ async function syncMemoryMode() {
       const data = await res.json();
       if (Object.hasOwn(copy, data.value)) {
         select.value = data.value;
-      } else {
-        const legacy = await fetch('/api/prefs/auto_memory');
-        const legacyData = legacy.ok ? await legacy.json() : {};
-        select.value = typeof legacyData.value === 'boolean' ? (legacyData.value ? 'automatic' : 'off') : 'manual';
       }
     }
   } catch (e) {
@@ -4257,6 +4254,10 @@ export function renderMemoryList() {
           const ticket = _memoryActionTicket();
           const scope = _pairedScope();
           const items = [
+            { id: 'persona', label: 'Review as a persona change…', dialog: true, run: async () => {
+              const {reviewPersonaChange} = await import('./personaReview.js');
+              reviewPersonaChange(String(memory.id), () => valid() && _memoryActionCurrent(ticket) && _pairedCurrent(scope));
+            } },
             { id: 'snapshot', label: 'Export knowledge snapshot', dialog: true, run: () =>
               openKnowledgeSnapshotExport({ curatedID: String(memory.id),
                 current: () => valid() && _memoryActionCurrent(ticket) && _pairedCurrent(scope) }) },
@@ -4851,49 +4852,21 @@ export function updateMemoryCount() {
   if (tabCount) tabCount.textContent = num;
 }
 
-const _originalMemoryAdds = new Map();
 export async function addNewMemory() {
   const input = document.getElementById('new-memory-input');
   const text = input.value.trim();
   const category = _readNewMemoryCategory();
   const ticket = _memoryActionTicket();
-  const account = document.body?.dataset?.accountId;
-  if (!text) { showError('Memory text cannot be empty'); return; }
-  if (!account) { showError('Account is unavailable.'); return; }
-  const old = _originalMemoryAdds.get(account);
-  if (old && (old.text !== text || old.category !== category)) {
-    showError('Check the original Add outcome before changing its text or category.'); return;
-  }
-  const original = old || {account, text, category, request_key: crypto.randomUUID()};
-  if (original.busy) return;
-  original.busy = true;
-  _originalMemoryAdds.set(account, original);
+  const current = () => _memoryActionCurrent(ticket);
   try {
-    const response = await fetch(`${window.location.origin}/api/memory/add`, {
-      method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'same-origin',
-      body: JSON.stringify({text: original.text, category: original.category,
-                            request_key: original.request_key, action: old ? 'status' : 'submit'})
-    });
-    if (!_memoryActionCurrent(ticket) || document.body?.dataset?.accountId !== account) return;
-    if (!response.ok) {
-      const body = await response.json().catch(() => null);
-      if (body?.reason === 'memory_preparing') throw new Error('Memory is still being prepared for this account. Try again in a moment.');
-      throw new Error('Original Add outcome unavailable; select Add again to check status.');
-    }
-    const result = await response.json();
-    if (!_memoryActionCurrent(ticket) || document.body?.dataset?.accountId !== account) return;
-    if (result.state === 'absent') { showError('Original Add was not found; its outcome remains unresolved.'); return; }
-    const guarded = ['applied','staged','terminal_erased'].includes(result.state);
-    const legacy = !old && result.ok === true && !Object.hasOwn(result, 'state')
-      && (typeof result.memory_id === 'string' || (Number.isSafeInteger(result.count) && result.message === 'Memory already exists'));
-    if (!guarded && !legacy) throw new Error('Original Add outcome unavailable.');
-    _originalMemoryAdds.delete(account);
-    if (input.value.trim() === original.text && _readNewMemoryCategory() === original.category) input.value = '';
+    const result = await saveExplicitMemory(text, category, current);
+    if (!result || !current()) return;
+    if (input.value.trim() === text && _readNewMemoryCategory() === category) input.value = '';
     await loadMemories();
-    if (_memoryActionCurrent(ticket)) showToast(result.state === 'terminal_erased' ? 'Original Add was erased' : result.pending_review ? 'Sent to Candidates for review' : 'Memory added');
+    if (current()) showToast(memoryAddMessage(result));
   } catch (error) {
-    if (_memoryActionCurrent(ticket)) showError(error.message || 'Original Add outcome unavailable; check status.');
-  } finally { original.busy = false; }
+    if (current()) showError(error.message);
+  }
 }
 
 export async function editMemory(id) {

@@ -2510,17 +2510,25 @@ def _prepare_policy_projection(*, state, profile, target, auth, users):
         binding = target.resolve(account)
         return account, binding.memory_workspace
 
+    def digest(prefs, allowed):
+        value = {'preferences': preference_inputs(prefs), 'can_manage_memory': allowed}
+        return hashlib.sha256(_exact_json(value).encode()).hexdigest()
+
     def fingerprint(user, prefs):
         privileges = auth.get_privileges(user)
         if type(privileges) is not dict or type(privileges.get('can_manage_memory')) is not bool:
             raise ValueError('policy privilege unavailable')
-        value = {'preferences': preference_inputs(prefs), 'can_manage_memory': privileges['can_manage_memory']}
-        return hashlib.sha256(_exact_json(value).encode()).hexdigest()
+        return digest(prefs, privileges['can_manage_memory'])
+
+    def previous_default(user, prefs):
+        if auth.inherits_memory_management(user) and auth.get_privileges(user)['can_manage_memory'] is True:
+            return digest(prefs, False)
+        return None
 
     coordinator = policy_coordinator()
     if coordinator is None:
         coordinator = PolicyTransitionCoordinator(PolicyProjection(preparation), resolve=resolve,
-            fingerprint=fingerprint, assert_current=profile.assert_current)
+            fingerprint=fingerprint, assert_current=profile.assert_current, previous_default=previous_default)
         register_policy_coordinator(coordinator)
     elif (type(coordinator) is not PolicyTransitionCoordinator
           or coordinator.projection._preparation is not preparation):
@@ -2540,7 +2548,7 @@ def _prepare_policy_projection(*, state, profile, target, auth, users):
             with PREFERENCE_LOCK:
                 return copy.deepcopy(_load_for_user(user))
         coordinator.qualify_initial(account, workspace, read_prefs, lambda prefs: fingerprint(user, prefs),
-            check_target=lambda: resolve(user) == (account, workspace))
+            check_target=lambda: resolve(user) == (account, workspace), user=user)
         if resolve(user) != (account, workspace):
             raise ValueError('policy target changed')
     profile.assert_current()

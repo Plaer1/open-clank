@@ -1875,6 +1875,14 @@
                 <button type="button" id="settings-persona-delete" class="btn-secondary" style="display:none" title="Delete this saved persona">Delete</button>
                 <span id="default-persona-status" class="admin-toggle-sub"></span>
               </div>
+              <details>
+                <summary>Portable profile</summary>
+                <p class="admin-toggle-sub">Take this persona to another installation. To carry selected memories with it, attach a knowledge snapshot bundle exported from Memery.</p>
+                <label>Knowledge bundle (optional) <input id="persona-profile-knowledge" type="file" accept=".json,application/json"></label>
+                <button type="button" id="persona-profile-export" class="btn-secondary">Export profile</button>
+                <label>Import profile <input id="persona-profile-import" type="file" accept=".json,application/json"></label>
+                <button type="button" id="persona-profile-review" class="btn-secondary" hidden>Review included memories</button>
+              </details>
             </div>
           </div>
           <div class="admin-card">

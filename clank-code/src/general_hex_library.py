@@ -220,7 +220,7 @@ class GeneralHexRepository:
         with self._connection(write=True) as conn:
             return self._save(conn, owner_id, uuid.uuid4().hex, 1, dict(title=title, body=body, tags=tags, enabled=enabled, authorship=authorship, accepted=accepted, provenance=provenance))
 
-    def update(self, owner_id, hex_id, *, expected_revision, **changes):
+    def update(self, owner_id, hex_id, *, expected_revision, account_id=None, **changes):
         allowed = {'title', 'body', 'tags', 'enabled', 'accepted', 'authorship', 'provenance'}
         if set(changes) - allowed:
             raise GeneralHexError("unsupported General Hex fields")
@@ -229,18 +229,23 @@ class GeneralHexRepository:
             if before['revision'] != _revision(expected_revision):
                 raise GeneralHexConflict("General Hex changed; refresh before saving")
             values = dict(before, **changes)
+            if not before['enabled'] and values['enabled']:
+                from src.general_hex_guidance import GeneralHexGuidance
+                GeneralHexGuidance(self.db_path).validate_reactivation(conn, owner_id, account_id, before, values)
             # Editing assisted content invalidates its earlier acceptance unless
             # this explicit save accepts the reviewed new body.
             if values['authorship'] == 'agent' and ('body' in changes or 'authorship' in changes) and 'accepted' not in changes:
                 values['accepted'] = False
             return self._save(conn, before['owner_id'], before['hex_id'], before['revision'] + 1, values)
 
-    def restore(self, owner_id, hex_id, *, revision, expected_revision):
+    def restore(self, owner_id, hex_id, *, revision, expected_revision, account_id=None):
         with self._connection(write=True) as conn:
             before = self._get(conn, owner_id, hex_id, include_deleted=True)
             if before['revision'] != _revision(expected_revision):
                 raise GeneralHexConflict("General Hex changed; refresh before restoring")
             original = self._get(conn, owner_id, hex_id, revision)
+            from src.general_hex_guidance import GeneralHexGuidance
+            GeneralHexGuidance(self.db_path).validate_reactivation(conn, owner_id, account_id, before, original)
             values = dict(original, deleted=False)
             values['provenance'] = dict(original['provenance'], restored_from_revision=revision)
             return self._save(conn, before['owner_id'], before['hex_id'], before['revision'] + 1, values)

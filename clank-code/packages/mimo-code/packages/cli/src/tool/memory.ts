@@ -18,7 +18,13 @@ import * as Tool from "./tool"
 const parameters = z.object({
   operation: z.enum(["search", "manage", "prepared_page", "prepared_hydrate", "snapshot_read", "save", "status"]).optional().describe("Memory operation to perform (default: search)"),
   management: z.object({
-    action: z.enum(["list", "add", "edit", "delete", "search", "resolve"]),
+    action: z.enum(["list", "add", "edit", "delete", "search", "resolve", "guidance_context", "propose_guidance"]),
+    change: z.enum(["revise", "retire"]).optional(),
+    hex_id: z.string().min(1).max(256).optional(),
+    expected_revision: z.number().int().min(1).max(2147483647).optional(),
+    reason: z.string().min(1).max(2000).optional(),
+    evidence_ids: z.array(z.string().min(1).max(256)).min(1).max(8).optional(),
+    body: z.string().min(1).max(4000).optional(),
     memory_id: z.string().min(1).max(256).optional(),
     text: z.string().min(1).max(4000).optional(),
     category: z.enum(["fact", "event", "contact", "preference", "unknown", "question"]).optional(),
@@ -58,7 +64,7 @@ export const MemoryTool = Tool.define<typeof parameters, Tool.Metadata, Memory.S
             if (!input || Object.keys(args).some(key => key !== "operation" && key !== "management") ||
                 Flag.OPEN_CLANK_PRIVATE_RUNTIME || !ctx.callID || !ctx.messageID || ctx.abort.aborted ||
                 !actor || actor.sessionID !== ctx.sessionID || !actor.innerTurnID || !actor.rootOperationID) return unavailable
-            if (!["list", "search"].includes(input.action) && !isMemoryWriteEnabled(yield* config.get())) return unavailable
+            if (!["list", "search", "guidance_context"].includes(input.action) && !isMemoryWriteEnabled(yield* config.get())) return unavailable
             const identity = {sessionID: ctx.sessionID, rootOperationID: actor.rootOperationID, actorID: actor.actorID,
               executionRevision: actor.executionRevision, innerTurnID: actor.innerTurnID}
             if (!isAdmittedToolTimingTurn(actor, identity)) return unavailable

@@ -27569,6 +27569,121 @@
                 }
               },
               "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": [
+                "action"
+              ],
+              "properties": {
+                "action": {
+                  "const": "guidance_context"
+                },
+                "query": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": [
+                "action",
+                "change",
+                "hex_id",
+                "expected_revision",
+                "reason",
+                "evidence_ids",
+                "body"
+              ],
+              "properties": {
+                "action": {
+                  "const": "propose_guidance"
+                },
+                "change": {
+                  "const": "revise"
+                },
+                "hex_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 2147483647
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "evidence_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "minItems": 1,
+                  "maxItems": 8,
+                  "uniqueItems": true
+                },
+                "body": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": [
+                "action",
+                "change",
+                "hex_id",
+                "expected_revision",
+                "reason",
+                "evidence_ids"
+              ],
+              "properties": {
+                "action": {
+                  "const": "propose_guidance"
+                },
+                "change": {
+                  "const": "retire"
+                },
+                "hex_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "expected_revision": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 2147483647
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "evidence_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "minItems": 1,
+                  "maxItems": 8,
+                  "uniqueItems": true
+                }
+              },
+              "additionalProperties": false
             }
           ]
         }

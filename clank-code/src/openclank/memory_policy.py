@@ -51,7 +51,7 @@ def explicit_human_review_allowed(snapshot: Any) -> bool:
         return False
     raw_mode = legacy["memory_mode"]
     if raw_mode is None:
-        mode = memory_mode({})
+        mode = memory_mode({"auto_memory": legacy["auto_memory"]} if legacy["auto_memory"] is not None else {})
     elif type(raw_mode) is str and raw_mode.strip().lower() in {"off", "manual", "automatic"}:
         mode = memory_mode({"memory_mode": raw_mode})
     else:

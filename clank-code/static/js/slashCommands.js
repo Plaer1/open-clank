@@ -1,3 +1,4 @@
+import { explicitMemoryCommandText, saveExplicitMemory, memoryAddMessage } from './explicitMemory.js';
 // static/js/slashCommands.js
 // Slash command handlers and dispatcher, extracted from chat.js
 
@@ -1439,23 +1440,18 @@ async function _cmdMemoryList(args, ctx) {
 }
 
 async function _cmdMemoryAdd(args, ctx) {
-  const text = args.join(' ');
-  if (!text) { slashReply('Usage: /memory add Your text here'); return true; }
-  const res = await fetch(`${API_BASE}/api/memory/add`, {
-    method: 'POST', credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, category: 'fact', source: 'user' })
-  });
-  let data = {};
-  try { data = await res.json(); } catch (_) { /* response may be empty */ }
-  if (res.ok) {
-    await typewriterReply(
-      data.pending_review
-        ? `Memory sent to review: ${ctx.esc(text)}`
-        : `Memory added: ${ctx.esc(text)}`
-    );
-  } else {
-    slashReply(ctx.esc(data.detail || 'Failed to add memory'));
+  const text = explicitMemoryCommandText(ctx.commandInput);
+  const current = () => ctx.sid === sessionModule.getCurrentSessionId()
+    && ctx.account === document.body?.dataset?.accountId
+    && !sessionModule.isCurrentSessionIncognito?.() && !uiModule.el('incognito-toggle')?.checked
+    && !window.compareModule?.isActive();
+  if (!current()) { slashReply('Use a regular chat to save a memory.', {persist: false}); return true; }
+  if (!text) { slashReply('Usage: /remember Your text here'); return true; }
+  try {
+    const result = await saveExplicitMemory(text, 'fact', current);
+    if (result && current()) slashReply(ctx.esc(memoryAddMessage(result)));
+  } catch (error) {
+    if (current()) slashReply(ctx.esc(error.message));
   }
   return true;
 }
@@ -4960,6 +4956,7 @@ const COMMANDS = {
     noUserBubble: true,
     usage: '/workspace [set <path> | clear | pick]',
   },
+  remember: { category: 'Memory', scope: 'account', handler: _cmdMemoryAdd, help: 'Save a memory', usage: '/remember text', noUserBubble: true },
   memory: {
     alias: ['m'],
     category: 'Memory',
@@ -4967,7 +4964,7 @@ const COMMANDS = {
     default: 'list',
     subs: {
       'list':   { handler: _cmdMemoryList,   alias: ['ls'],          help: 'List all memories',   usage: '/memory list' },
-      'add':    { handler: _cmdMemoryAdd,    alias: ['echo'],        help: 'Save a memory',       usage: '/memory add text' },
+      'add':    { noUserBubble: true, handler: _cmdMemoryAdd,    alias: ['echo'],        help: 'Save a memory',       usage: '/memory add text' },
       'delete': { handler: _cmdMemoryDelete, alias: ['del', 'rm'],   help: 'Delete by ID',        usage: '/memory delete id' },
       'search': { handler: _cmdMemorySearch, alias: ['grep'],        help: 'Search memories',     usage: '/memory search q' }
     }
@@ -5577,7 +5574,7 @@ export async function forkConversation({ sid, selection, selector, commandText, 
 // ── Main dispatcher ───────────────────────────────────────────────
 
 async function handleSlashCommand(input) {
-  const ctx = { ..._makeCtx(), commandInput: input };
+  const ctx = { ..._makeCtx(), commandInput: input, account: document.body?.dataset?.accountId };
   let userShown = false;
   let timelineOnly = false;
   const showUser = () => { if (!userShown) { userShown = true; _addMessage('user', input); _persistMsg('user', input, { source: 'slash' }); } };

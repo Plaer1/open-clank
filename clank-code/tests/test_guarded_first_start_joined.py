@@ -96,6 +96,16 @@ async def _add_list_recall(provider, coordinator, owner, account, workspace, tex
         {"selector": selector, "request_key": f"gdef-batch-request-{owner}-0001", "preview_sha256": preview["preview_sha256"]},
         before_issue=before_issue)
     assert applied["state"] == "committed", applied
+    from src.memory_gate import write_allowed
+    assert write_allowed({})[0]
+    saved = await provider._host_explicit_add({
+        "version": 1, "owner": owner, "workspace_id": workspace, "account_id": account,
+        "request_key": f"gdef-ordinary-{owner}-0001", "policy_projection": refs,
+        "content": "juniper is the synthetic project name", "category": "fact",
+        "source": "user", "question_context": None, "mode": "manual"}, before_issue=before_issue)
+    assert saved["state"] == "applied", saved
+    assert any(hit.memory.text == "juniper is the synthetic project name"
+               for hit in await provider.recall("juniper", owner=owner, top_k=3))
     listed = await provider.list_memories(owner=owner, limit=100)
     recalled = await provider.recall(text.split()[0], owner=owner, top_k=5)
     return listed, recalled
@@ -176,6 +186,7 @@ def test_first_permission_write_qualifies_only_an_absent_account_scope(monkeypat
     auth_path = str(Path(path).with_name("auth.json"))
     auth = AuthManager(auth_path)
     assert auth.create_user("reader", "test-guarded-account-password")
+    assert auth.set_privileges("reader", {"can_manage_memory": False})
     account = auth.account_id("reader")
     monkeypatch.setattr(prefs_routes, "_load_for_user", lambda _user: {})
 
@@ -279,15 +290,73 @@ def test_preparation_failure_refuses_and_leaves_no_file_at_final_path():
     assert not any(name.startswith(".prepare-") for name in os.listdir(os.path.dirname(path)))
 
 
-def test_fresh_guarded_store_preference_defaults_are_unchanged():
-    """Decision 8: nothing turns on by itself on a fresh guarded store."""
+def test_fresh_guarded_store_uses_ordinary_automatic_memory():
     path = _fresh_db_path()
     os.environ.pop("OPENCLANK_MEMORY_STORE_PROFILE", None)
     fd.resolve_memory_store_profile(path)
     from src.memory_gate import memory_mode, write_allowed
     prefs = {}
-    assert memory_mode(prefs) == "manual"  # absent memory_mode defaults to review-first, same as legacy
+    assert memory_mode(prefs) == "automatic"
     allowed, _ = write_allowed(prefs)
-    assert allowed is False  # manual mode refuses a direct write; Add still stages via review_only
+    assert allowed is True
     from routes.prefs_routes import _load_for_user  # sanity: no prefs file exists yet for a brand-new account
     assert (_load_for_user("nobody-yet") or {}) == {}
+
+
+def test_previous_memory_default_migrates_only_matching_ready_receipt(monkeypatch):
+    import hashlib
+    from types import SimpleNamespace
+    from core.auth import AuthManager
+    from routes import prefs_routes
+    from src.openclank.memory_job_admission import _prepare_policy_projection
+    from src.openclank.memory_policy_projection import exact_json, preference_inputs
+    from src import settings
+
+    path = _fresh_db_path()
+    profile_name = fd.resolve_memory_store_profile(path)
+    prep = fd.prepare_guarded_memery_database(path, command=os.environ["OPEN_CLANK_MEMERY_WORKER"], profile=profile_name)
+    profile = SimpleNamespace(path=path, provider=SimpleNamespace(_guarded_preparation=prep), assert_current=prep.assert_valid)
+    auth = AuthManager(str(Path(path).with_name("auth.json")))
+    owners = ["inherited", "manual", "denied", "fenced", "other"]
+    for user in owners:
+        assert auth.create_user(user, "test-guarded-migration-password")
+    assert auth.set_privileges("denied", {"can_manage_memory": False})
+    prefs = {"memory_enabled": True}
+    monkeypatch.setattr(prefs_routes, "_load_for_user", lambda _: dict(prefs))
+    monkeypatch.setattr(settings, "_read_persisted_settings", lambda: {})
+    def digest(allowed):
+        value = {"preferences": preference_inputs(prefs), "can_manage_memory": allowed}
+        return hashlib.sha256(exact_json(value).encode()).hexdigest()
+    projection = PolicyProjection(prep)
+    before = {}
+    for user in owners:
+        account = auth.account_id(user)
+        _provision_scope(projection, account, "global", digest=digest(False) if user != "other" else "e" * 64)
+        row = projection.read_scope(account, "global")
+        before[user] = projection.fence(account, "global", row) if user == "fenced" else row
+    state = SimpleNamespace()
+    def qualify(users):
+        return _prepare_policy_projection(state=state, profile=profile,
+            target=SimpleNamespace(resolve=lambda _: SimpleNamespace(memory_workspace="global")),
+            auth=auth, users=[{"username": u} for u in users])
+    coordinator = qualify(["inherited", "denied"])
+    def interrupted(*args, **kwargs):
+        raise OSError("interrupted before commit")
+    with monkeypatch.context() as attempt:
+        attempt.setattr(coordinator.projection, "_transition", interrupted)
+        with pytest.raises(OSError, match="interrupted before commit"):
+            coordinator.prepare_explicit_account("manual", auth.account_id("manual"), "global")
+    assert coordinator.projection.read_scope(auth.account_id("manual"), "global") == before["manual"]
+    coordinator.prepare_explicit_account("manual", auth.account_id("manual"), "global")
+    for user in ("inherited", "manual"):
+        row = projection.read_scope(auth.account_id(user), "global")
+        assert (row["state"], row["epoch"], row["fingerprint"]) == ("ready", before[user]["epoch"] + 1, digest(True))
+        assert row["transition_id"] != before[user]["transition_id"]
+        qualify([user])
+        assert projection.read_scope(auth.account_id(user), "global") == row
+    assert projection.read_scope(auth.account_id("denied"), "global") == before["denied"]
+    for user in ("fenced", "other"):
+        with pytest.raises(ValueError, match="policy reconciliation unavailable"):
+            qualify([user])
+        row = projection.read_scope(auth.account_id(user), "global")
+        assert row["state"] == "fenced" and row["fingerprint"] == before[user]["fingerprint"]

@@ -59,3 +59,20 @@ test("image source inspection preserves unknown provider delivery", async () => 
   expect(projectContextInspection({...record,frames:[{...frame,sources:[{...media,providerDelivery:"delivered"}]}]})).toBeUndefined()
   expect(projectContextInspection({...record,frames:[{...frame,sources:[{...media,partID:undefined}]}]})).toBeUndefined()
 })
+
+test("profile inspection matches the actual frame and stores only fingerprints", async () => {
+  const {createHash} = await import("node:crypto")
+  const hash = (s:string) => createHash("sha256").update(s).digest("hex")
+  const persona = "Call me Scout", guidance = "Use the blue route", memory = "Remember the lighthouse"
+  const base = {identity:{sessionID:"s"}, sequence:{attempt:1,transform:1}, providerID:"p", modelID:"m",
+    window:{hard:100,effective:80,usable:70,source:"model" as const}, instructions:undefined, tools:[],
+    profileInputs:{persona, guidance:{text:guidance,textSHA256:hash(guidance),attestationID:"g",wireProfile:"openai-chat" as const},
+      recall:{text:memory,textSHA256:hash(memory),contextPartID:"r",attestationID:"a",index:1,count:2,wireProfile:"openai-chat" as const}}}
+  const prompt = [{role:"system",content:persona+"\n"+guidance},{role:"user",content:[{type:"text",text:memory}]}]
+  const frame = contextFrame({...base, prompt})
+  expect(frame.profile).toEqual({personaInstructions:hash(persona), standingGuidance:hash(guidance), recalledMemery:hash(memory)})
+  expect(JSON.stringify(frame)).not.toContain(memory)
+  expect(contextFrame({...base, prompt:[]}).profile).toEqual({personaInstructions:null, standingGuidance:null, recalledMemery:null})
+  const {projectContextInspection} = await import("../../src/session/context-inspection")
+  expect(projectContextInspection({version:1, frames:[frame], omittedFrameCount:0})?.frames[0].profile).toEqual(frame.profile)
+})

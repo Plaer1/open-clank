@@ -31,7 +31,7 @@ from src.memory_gate import (
 class TestMemoryMode:
     def test_default_when_absent(self):
         assert memory_mode({}) == DEFAULT_MODE
-        assert memory_mode(None) == DEFAULT_MODE
+        assert memory_mode(None) == "manual"
 
     def test_valid_modes(self):
         for mode in VALID_MODES:
@@ -41,9 +41,9 @@ class TestMemoryMode:
         assert memory_mode({PREF_KEY: "OFF"}) == "off"
         assert memory_mode({PREF_KEY: "Manual"}) == "manual"
 
-    def test_garbage_falls_back_to_default(self):
-        assert memory_mode({PREF_KEY: "yolo"}) == DEFAULT_MODE
-        assert memory_mode({PREF_KEY: 42}) == DEFAULT_MODE
+    def test_garbage_requires_review(self):
+        assert memory_mode({PREF_KEY: "yolo"}) == "manual"
+        assert memory_mode({PREF_KEY: 42}) == "manual"
 
     def test_strips_whitespace(self):
         assert memory_mode({PREF_KEY: "  off  "}) == "off"
@@ -95,9 +95,9 @@ class TestCaptureAllowed:
 # ─── Write gate ──────────────────────────────────────────────────────────
 
 class TestWriteAllowed:
-    def test_missing_defaults_to_manual_and_automatic_allows_write(self):
+    def test_fresh_account_and_explicit_automatic_allow_write(self):
         ok, _ = write_allowed({})
-        assert ok is False
+        assert ok is True
         ok, _ = write_allowed({PREF_KEY: "automatic"})
         assert ok is True
 
@@ -112,7 +112,7 @@ class TestWriteAllowed:
         assert ok is False
         assert "manual" in reason.lower()
 
-    def test_write_allowed_ignores_auto_memory(self):
+    def test_write_allowed_preserves_legacy_off(self):
         """A legacy bit cannot silently grant new direct-write authority."""
         ok, _ = write_allowed({"auto_memory": False})
         assert ok is False
@@ -220,7 +220,7 @@ class TestDegradation:
 
     def test_empty_prefs(self):
         assert capture_allowed({}) is True
-        assert write_allowed({})[0] is False
+        assert write_allowed({})[0] is True
 
     def test_corrupted_mode_value(self):
         """Garbage in prefs doesn't crash — falls back to default."""
@@ -229,7 +229,7 @@ class TestDegradation:
 
     def test_list_instead_of_string(self):
         assert capture_allowed({PREF_KEY: ["off"]}) is True  # not a valid mode str
-        assert memory_mode({PREF_KEY: ["off"]}) == DEFAULT_MODE
+        assert memory_mode({PREF_KEY: ["off"]}) == "manual"
 
 
 # ─── Integration: manage_memory tool add respects gate ──────────────────

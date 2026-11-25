@@ -466,10 +466,10 @@ pub enum ServiceRequest {
     ReadMemeryComponent { envelope: ControlEnvelope, change: String, digest: String, resource: String, part: u16 },
     InspectMemeryComponent { envelope: ControlEnvelope, change: String, digest: String, resource: String },
     SweepMemeryComponents(ControlEnvelope),
-    GetMemeryManifest { envelope: ControlEnvelope, assets: bool },
+    GetMemeryManifest { envelope: ControlEnvelope, assets: crate::catalog::MemeryCollection },
     SettleMemeryManifest {
         envelope: ControlEnvelope,
-        assets: bool,
+        assets: crate::catalog::MemeryCollection,
         checkpoint: bool,
         generation: u64,
         position: u64,

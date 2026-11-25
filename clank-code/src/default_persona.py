@@ -21,6 +21,7 @@ push there and assistant edits push back.
 """
 
 import logging
+import threading
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -279,6 +280,13 @@ def _get_default_persona_with_origin(owner: str = "", preset_manager=None):
     return _resolve_default_persona(owner,preset_manager,_with_origin=True)
 
 
+_persona_write_lock = threading.RLock()
+
+
+class PersonaConflict(ValueError):
+    pass
+
+
 def set_default_persona(
     owner: str,
     *,
@@ -286,6 +294,7 @@ def set_default_persona(
     system_prompt: Optional[str] = None,
     preset_manager=None,
     sync_assistant: bool = True,
+    expected: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Write the owner's default persona and sync the other stores (R13).
 
@@ -293,36 +302,39 @@ def set_default_persona(
     where the CrewMember row is the SOURCE of the edit and pushing to it
     again would be redundant.
     """
-    manager = _manager(preset_manager)
-    current = get_default_persona(owner, preset_manager=manager)
-    record = {
-        "name": (name if name is not None else current["name"]).strip() or FACTORY_NAME,
-        "system_prompt": (
-            system_prompt if system_prompt is not None else current["system_prompt"]
-        ).strip()
-        or FACTORY_PROMPT,
-    }
-    presets = manager.presets
-    store = presets.get(_STORE_KEY)
-    if not isinstance(store, dict):
-        store = {}
-    store[owner or ""] = record
-    presets[_STORE_KEY] = store
-    manager.save(presets)
+    with _persona_write_lock:
+        manager = _manager(preset_manager)
+        current = get_default_persona(owner, preset_manager=manager)
+        if expected is not None and any(current.get(k) != v for k, v in expected.items()):
+            raise PersonaConflict("Persona changed")
+        record = {
+            "name": (name if name is not None else current["name"]).strip() or FACTORY_NAME,
+            "system_prompt": (
+                system_prompt if system_prompt is not None else current["system_prompt"]
+            ).strip()
+            or FACTORY_PROMPT,
+        }
+        presets = dict(manager.presets)
+        store = presets.get(_STORE_KEY)
+        if not isinstance(store, dict):
+            store = {}
+        presets[_STORE_KEY] = {**store, owner or "": record}
+        if manager.save(presets) is False:
+            raise OSError("Could not save the default persona")
 
-    if record["name"] != current["name"]:
-        # The principal bootstrap memo keys on the resolved label; drop the
-        # owner's entry so the next read re-syncs the assistant entity.
-        try:
-            from services.memory.principal_context import invalidate_principal_cache
+        if record["name"] != current["name"]:
+            # The principal bootstrap memo keys on the resolved label; drop the
+            # owner's entry so the next read re-syncs the assistant entity.
+            try:
+                from services.memory.principal_context import invalidate_principal_cache
 
-            invalidate_principal_cache(owner)
-        except Exception:
-            logger.debug("principal cache invalidation unavailable", exc_info=True)
+                invalidate_principal_cache(owner)
+            except Exception:
+                logger.debug("principal cache invalidation unavailable", exc_info=True)
 
-    if sync_assistant:
-        _push_to_assistant(owner, record)
-    return {**record, "is_factory": False}
+        if sync_assistant:
+            _push_to_assistant(owner, record)
+        return {**record, "is_factory": False}
 
 
 def reset_default_persona(owner: str, *, preset_manager=None) -> Dict[str, Any]:

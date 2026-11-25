@@ -16,8 +16,10 @@ test('inspector retains prior pages and discards stale account responses', async
   const [button,output,notice]=container.children[0].children; button.dispatchEvent(new Event('click')); await tick();
   expect(url).toContain('/api/orchestration/chat/context-observations?limit=5');
   expect(output.children[0].children[0].textContent).toContain('2 omitted');
-  expect(output.children[0].children[1].children[1].textContent).toContain('usable window 0');
-  const section=output.children[0].children[1], controls=section.children.at(-1);
+  expect(output.children[0].children[2].children[1].textContent).toContain('usable window 0');
+  const section=output.children[0].children[2], controls=section.children.at(-1);
+  expect(section.children[3].children[0].textContent).toBe('Persona, guidance and Memery');
+  expect(section.children[3].children[1].textContent).toContain('no profile evidence');
   const [choice, preview, apply, status]=controls.children; choice.value='trim';
   preview.dispatchEvent(new Event('click')); choice.value='restore'; choice.dispatchEvent(new Event('change'));
   previewResolve({ok:true,json:async()=>({preview:{version:1,action:'trim',parts:[]}})}); await tick();

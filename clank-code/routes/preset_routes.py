@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from src.request_models import PresetUpdateRequest
 from core.middleware import require_admin
-from src.auth_helpers import effective_user, require_user
+from src.auth_helpers import effective_user, is_internal_tool_identity, require_user
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +22,13 @@ class UserTemplateRequest(BaseModel):
     max_tokens: int = Field(0, ge=0, le=65536)
 
 
-class DefaultPersonaRequest(BaseModel):
+class PersonaFields(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     system_prompt: str = Field(..., min_length=1, max_length=10000)
+
+
+class DefaultPersonaRequest(PersonaFields):
+    expected: PersonaFields | None = None
 
 
 def setup_preset_routes(preset_manager) -> APIRouter:
@@ -32,7 +36,7 @@ def setup_preset_routes(preset_manager) -> APIRouter:
 
     @router.get("/api/presets")
     async def get_presets() -> Dict[str, Any]:
-        return preset_manager.presets
+        return {k: v for k, v in preset_manager.presets.items() if k != "default_personas"}
 
     @router.post("/api/presets/custom")
     async def update_custom_preset(preset_update: PresetUpdateRequest, _admin: None = Depends(require_admin)) -> Dict[str, Any]:
@@ -54,13 +58,10 @@ def setup_preset_routes(preset_manager) -> APIRouter:
             raise HTTPException(500, "Failed to update custom preset")
 
     def _persona_owner(request: Request) -> str:
-        owner = effective_user(request)
-        if owner is not None:
-            return owner
-        # Reuse the shared route boundary so explicit single-user mode and
-        # first-run loopback behave like every other owner-aware endpoint,
-        # while configured auth still fails closed.
-        return require_user(request)
+        owner = require_user(request)
+        if is_internal_tool_identity(owner):
+            raise HTTPException(403, "Persona settings require a user session")
+        return owner
 
     @router.get("/api/presets/default-persona")
     async def get_default_persona_route(request: Request) -> Dict[str, Any]:
@@ -74,14 +75,14 @@ def setup_preset_routes(preset_manager) -> APIRouter:
         payload: DefaultPersonaRequest, request: Request
     ) -> Dict[str, Any]:
         """Edit the default persona; syncs assistant + reminder voice (R13)."""
-        from src.default_persona import set_default_persona
+        from src.default_persona import PersonaConflict, set_default_persona
         owner = _persona_owner(request)
-        record = set_default_persona(
-            owner,
-            name=payload.name,
-            system_prompt=payload.system_prompt,
-            preset_manager=preset_manager,
-        )
+        try:
+            record = set_default_persona(owner, name=payload.name, system_prompt=payload.system_prompt,
+                                        expected=payload.expected.model_dump() if payload.expected else None,
+                                        preset_manager=preset_manager)
+        except PersonaConflict as error:
+            raise HTTPException(409, "Persona changed. Review the current version before saving.") from error
         return {"success": True, **record}
 
     @router.post("/api/presets/default-persona/reset")

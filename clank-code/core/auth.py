@@ -49,6 +49,7 @@ _OPTIONAL_FEATURES = tuple(key for key in _LEGACY_DEFAULT_PRIVILEGES if key.star
 DEFAULT_PRIVILEGES = {
     **_LEGACY_DEFAULT_PRIVILEGES,
     **dict.fromkeys(_OPTIONAL_FEATURES, False),
+    "can_manage_memory": True,
     "block_all_models": True,
 }
 ADMIN_PRIVILEGES = {
@@ -621,6 +622,17 @@ class AuthManager:
             return {}
         return _effective_privileges(users[key], config.get("first_run_owner"))
 
+    def inherits_memory_management(self, username: str) -> bool:
+        config = self._config
+        users = config.get("users", {})
+        key = normalize_known_username(users, username)
+        if key is None:
+            return False
+        user = users[key]
+        if user.get("full_access") is True and user.get("account_id") == config.get("first_run_owner"):
+            return False
+        return "can_manage_memory" not in _saved_privileges(user)
+
     def full_access_status(self, username: str) -> dict:
         config = self._config
         users = config.get("users", {})
@@ -706,7 +718,10 @@ class AuthManager:
             if not current or current.get('is_admin') or 'can_manage_memory' not in privileges:
                 return self._set_privileges_inner_unlocked(name, privileges)
             old = _effective_privileges(current, self._config.get("first_run_owner"))["can_manage_memory"]
-            if old == (privileges["can_manage_memory"] is True):
+            # A first explicit grant also ends eligibility for the old-default
+            # migration. Reconcile its projection before saving that choice.
+            first_grant = old and self.inherits_memory_management(name)
+            if old == (privileges["can_manage_memory"] is True) and not first_grant:
                 return self._set_privileges_inner_unlocked(name, privileges)
         from routes.prefs_routes import PREFERENCE_LOCK, _load_for_user
         with PREFERENCE_LOCK:

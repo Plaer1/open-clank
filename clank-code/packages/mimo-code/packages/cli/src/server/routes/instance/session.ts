@@ -1276,7 +1276,7 @@ export const SessionRoutes = lazy(() =>
             sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,sql`json_extract(${PartTable.data}, '$.callID') = ${body.toolCallID}`)).limit(2).all()
         })
         const memoryInferred = (input: unknown) => {
-          const management = z.object({operation: z.literal("manage"), management: z.record(z.string(), z.string())}).strict().safeParse(input)
+          const management = z.object({operation: z.literal("manage"), management: z.record(z.string(), z.union([z.string(), z.number().int(), z.array(z.string())]))}).strict().safeParse(input)
           if (management.success) {
             const values = Object.entries(management.data.management).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
             return {argsSHA256: createHash("sha256").update(JSON.stringify(["openclank.memery.manage.v1", values]), "utf8").digest("hex")}

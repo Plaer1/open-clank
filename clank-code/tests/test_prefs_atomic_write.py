@@ -20,9 +20,9 @@ def test_save_replaces_prefs_file_atomically(monkeypatch, tmp_path):
     assert len(calls) == 1
     src, dst = calls[0]
     assert dst == str(prefs_file)
-    assert src.startswith(str(prefs_file) + ".tmp.")
+    assert prefs_routes.os.path.dirname(src) == str(prefs_file.parent)
     assert json.loads(prefs_file.read_text(encoding="utf-8")) == {"theme": "dark"}
-    assert not list(prefs_file.parent.glob("*.tmp.*"))
+    assert list(prefs_file.parent.iterdir()) == [prefs_file]
 
 
 def test_save_for_user_preserves_scoped_user_prefs(monkeypatch, tmp_path):
@@ -47,46 +47,20 @@ def test_save_for_user_preserves_flat_prefs_when_auth_disabled(monkeypatch, tmp_
     assert prefs_routes._load_for_user(None) == {"theme": "dark"}
 
 
-def test_memory_mode_backfill_freezes_existing_choices_and_is_idempotent(
-    monkeypatch, tmp_path
-):
-    prefs_file = tmp_path / "data" / "user_prefs.json"
-    prefs_file.parent.mkdir()
-    prefs_file.write_text(
-        json.dumps(
-            {
-                "_users": {
-                    "alice": {"auto_memory": False},
-                    "bob": {"theme": "dark"},
-                    "carol": {"memory_mode": "MANUAL"},
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(prefs_routes, "PREFS_FILE", str(prefs_file))
-
-    assert prefs_routes.backfill_memory_modes(["alice", "bob", "carol"])
-    assert not prefs_routes.backfill_memory_modes(["alice", "bob", "carol"])
-
-    users = json.loads(prefs_file.read_text(encoding="utf-8"))["_users"]
-    assert users["alice"]["memory_mode"] == "off"
-    assert users["bob"]["memory_mode"] == "automatic"
-    assert users["carol"]["memory_mode"] == "manual"
-
-
-def test_new_account_without_backfill_uses_manual_default(monkeypatch, tmp_path):
+def test_existing_explicit_and_legacy_settings_survive_the_new_default(monkeypatch, tmp_path):
     from src.memory_gate import memory_mode
 
-    prefs_file = tmp_path / "data" / "user_prefs.json"
-    prefs_file.parent.mkdir()
-    prefs_file.write_text(
-        json.dumps({"_users": {"existing": {"auto_memory": True}}}),
-        encoding="utf-8",
-    )
+    prefs_file = tmp_path / "user_prefs.json"
+    users = {
+        "legacy-off": {"auto_memory": False},
+        "legacy-on": {"auto_memory": True},
+        "review": {"memory_mode": "MANUAL"},
+        "off": {"memory_mode": "off", "auto_memory": True},
+    }
+    prefs_file.write_text(json.dumps({"_users": users}), encoding="utf-8")
     monkeypatch.setattr(prefs_routes, "PREFS_FILE", str(prefs_file))
 
-    prefs_routes.backfill_memory_modes(["existing"])
-
-    assert memory_mode(prefs_routes._load_for_user("existing")) == "automatic"
-    assert memory_mode(prefs_routes._load_for_user("new-user")) == "manual"
+    for owner, mode in (("legacy-off", "off"), ("legacy-on", "automatic"),
+                        ("review", "manual"), ("off", "off"), ("new", "automatic")):
+        assert memory_mode(prefs_routes._load_for_user(owner)) == mode
+    assert json.loads(prefs_file.read_text())["_users"] == users

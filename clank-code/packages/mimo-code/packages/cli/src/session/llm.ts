@@ -980,6 +980,8 @@ const live: Layer.Layer<
                 if (input.adaptiveStyle && input.onContextFrame && !input.ephemeral) {
                   try {
                     const frame=contextFrame({
+                      profileInputs: {persona: systemInPrefix(input.user) ? input.user.system : undefined,
+                        guidance: input.standingGuidance, recall: prefaceInput},
                       providerID: input.model.providerID, modelID: input.model.id,
                       identity: { sessionID: input.sessionID,
                         ...(input.requestContext?.actorExecution ? {
@@ -1204,6 +1206,8 @@ const live: Layer.Layer<
                 if (args.type === "stream" && !input.adaptiveStyle && input.onContextFrame && !input.ephemeral) {
                   try {
                     const frame=contextFrame({
+                      profileInputs: {persona: systemInPrefix(input.user) ? input.user.system : undefined,
+                        guidance: input.standingGuidance, recall: prefaceInput},
                       providerID: input.model.providerID, modelID: input.model.id,
                       identity: { sessionID: input.sessionID,
                         ...(input.requestContext?.actorExecution ? {

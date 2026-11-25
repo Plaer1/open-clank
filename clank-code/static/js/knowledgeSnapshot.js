@@ -96,13 +96,18 @@ export function openKnowledgeSnapshotBundleExport({curatedIDs,current}) {
   s.finish(()=>{confirmed.length=0;answer(false);});close.addEventListener('click',s.retire);controls();return true;
 }
 
-export function openKnowledgeSnapshotBundleImport({current}) {
+export function openKnowledgeSnapshotBundleImport({current, reviewedFileItems=null}) {
   if(typeof current!=='function'||current()!==true)return false;
   const s=bundleShell('Import knowledge snapshots','Choose a bundle file. You review each snapshot\'s full text and category in turn; nothing is imported until you choose Create review draft for that item.',current);
   const file=node('input'),start=s.button('Start import'),create=s.button('Create review draft'),skip=s.button('Skip'),close=s.button('Close');
   file.type='file';file.accept='.json,application/json';
   s.dialog.append(s.title,s.notice,file,s.view,s.meta,s.status,s.list,start,create,skip,close);document.body.append(s.dialog);wireDialog(s.dialog);s.dialog.showModal();
-  let busy=false,waiting=null,items=null;const checks=[];
+  let busy=false,waiting=null,items=reviewedFileItems;const checks=[];
+  if (items) {
+    file.hidden=true;
+    s.notice.textContent='Review the knowledge snapshots from your profile. Each selected item becomes a draft.';
+    s.status.textContent=items.length+' snapshots ready for review.';
+  }
   const controls=()=>{const ok=s.valid();file.disabled=busy||!ok;start.disabled=busy||!ok||!items;create.disabled=skip.disabled=!waiting||!ok;for(const b of checks)b.disabled=busy||!ok;};
   const post=(phase,body)=>fetch('/api/memory/knowledge-snapshot/import/'+phase,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:s.abort.signal});
   const answer=(v)=>{const w=waiting;waiting=null;if(w)w(v);controls();};

@@ -10,140 +10,39 @@ selection remains in source; the retired Chroma vector path is not an optional
 live backend. The architecture below describes the Memery path and
 retains implementation/historical names where they identify actual interfaces.
 
+## Account defaults
+
+Memery starts in Automatic mode. Explicit saves can enter the account’s memory immediately. Normal chats can recall up to three relevant curated records within a 1,200-character budget. Manual review stages new saves for approval. Off disables capture and recall. Incognito, per-turn privacy choices, and an administrator’s explicit permission denial still apply.
+
+Inferred material enters the existing candidate workflow. Background model jobs need a configured assignment and an accepted scheduling policy. Changes to standing guidance, personality and Hexes have their own review controls.
+
 ## The engine
 
-`native/memery` — an MCP stdio server over a single SQLite
-database (`FM_DB_PATH`). Tiers: **raw** (verbatim turn halves), **candidates**
-(heuristically admitted, pending review), **curated** (recallable memories,
-kinds persona/episodic/instruction/fact/fabric/wiki), plus a semantic graph
-(nodes/edges/cues) and per-repo code index.
+Open Clank runs the Rust Memery worker from `native/memery` over a private stdio protocol. The host authenticates the account, binds the workspace, checks permissions and owns worker lifecycle. MiMo calls back into the host for recall. A separate MCP server or model is unnecessary. Rust persists records, evidence, candidates, review receipts and retrieval indexes in SQLite.
 
-Every record is scoped by `(owner, workspace_id)`. Owner is the hard security
-wall. The workspace axis exists but conversational memory writes to one
-canonical workspace — the engine default `"global"` — via a single symbol per
-language: `src/memory_scope.py::chat_workspace()` (Python) and
-`CHAT_WORKSPACE` in `memory/session-scope.ts` (mimo). Read tools union the
-caller's workspace with `"global"`, so per-session workspaces still see the
-bank. The axis stays reserved for future genuinely project-scoped memory;
-`code_index` already uses it per repo. Never spell the literal — import the
-symbol.
+Conversational records use the account’s canonical chat workspace from `src/memory_scope.py::chat_workspace()`. Agent tools receive an authenticated scope. Repository indexes can also be workspace-specific.
 
-## Capture — every chat path writes, one owner
+## Saving a memory
 
-Turn capture is **Odysseus-owned and transport-blind**: mimo is a provider
-leg, not a separate memory system — every dispatched turn (direct endpoint
-or `mimo://acp`) passes through the same post-response seam, and only that
-seam knows the full policy context (incognito, compare mode, the user's
-auto-memory preference).
+In a regular chat, type `/remember <text>` or `/memory add <text>`. The composer sends the text directly to the same authenticated Add operation as the Memery applet. Each submission has a request key so a retry checks the original outcome. In Automatic mode a saved fact is eligible for later recall. In Manual mode it waits in Candidates. This path uses no model.
 
-- After each saved, non-Temporary Agent turn, `run_post_response_tasks` runs
-  `capture_turn_and_enrich` (`services/memory/graph_extractor.py`):
-  `MemeryProvider.capture()` → fm `capture` with
-  `capture_mode="candidate"` (heuristic admission, no LLM), then — when the
-  turn was admitted as a candidate — LLM graph enrichment on the task
-  endpoint (entities/edges/cues → `graph_upsert`; same prompt, tag
-  vocabulary, throttle policy, and forgiving wire schema as mimo's former
-  child-side extractor). Extraction failures never touch the captured
-  record. Throttle knobs: settings key `memory_graph`
-  (`every_n_turns`, `min_interval_seconds`, `enabled`).
-- The mimo child no longer captures turns; its `capture.ts` owns only the
-  memory session-scope lifecycle.
-- **Agent-authored MEMORY.md files**: mimo's reconcile pass projects every
-  mimo-root MEMORY-type file into fm through `ingest_authored` — one wiki
-  record per `##` section, idempotent by content hash, deletions wipe the
-  projection. The file stays the source of truth (records are decay- and
-  dedup-exempt); checkpoints, task notes, and cc-root files never ingest.
-- **Compaction summaries**: `compaction-capture.ts`, unchanged.
-- Temporary Agent and Compare turns are never captured anywhere.
+On guarded stores, ordinary conversation alone does not create a curated fact on every turn. Inferred material follows the source, permission and review rules for its admission path. Completed-turn background extraction also needs an accepted scheduling policy, eligible source evidence and a configured model assignment. Temporary and Compare chats do not participate in ordinary turn capture.
 
-## The overlay — index card + pull recall
+Older provider configurations used `run_post_response_tasks` and `capture_turn_and_enrich` for eligible turns. That compatibility path is separate from guarded-store admission.
 
-Every non-incognito turn carries one small **memory index card**: counts,
-up to 5 pinned headlines, up to 6 relationship clusters, up to 5 recent
-topics (bounded by item counts, never token budgets). It says what the bank
-*holds*, never the contents — the model pulls details through the recall
-tool its lane actually has (below) when a topic matters.
+## Recall and standing guidance
 
-- Source: fm `digest` tool (read-only, direct queries, p50 well under 1ms).
-  Pinned entries are enriched (id, full content, source_type, explicit
-  pinned flag) so the trust split below can classify them.
-- Renderer + sentinels: `src/memory_digest.py` (`render_split`,
-  `DIGEST_SENTINEL = "[Memory Index]"`,
-  `TRUST_SENTINEL = "[Endorsed Memory Guidance]"`).
-- Odysseus seam: `chat_processor.build_context_preface` injects the split;
-  it **replaced** the old top-3 auto-recall preface. 250ms timeout;
-  failure degrades to no card.
-- Bridge seam: `ACPBridge._maybe_inject_digest` prepends the card to mimo
-  turns that don't already carry the sentinel (Odysseus-prefaced turns do),
-  covering resume flows and future mimo-first paths; the trusted block
-  rides `envelope.system_prompt` to true system tier and the demoted
-  in-message copy is skipped at part building.
+The managed host can add a bounded selection of relevant curated records to an eligible turn before the model responds. An authorized Agent can also request deeper scoped recall with `recall_memory`. Privacy settings and account permissions apply to both paths. Recalled facts are context. Changes to standing guidance and personality follow their own review paths.
 
-## Trust tiers (memory-trust metaplan, 2026-07-17)
+Providers that supply a digest can also render a short memory index using `src/memory_digest.py`. Its compatibility trust classifier separates endorsed entries from ordinary context. The digest is distinct from guarded curated recall and may be absent on a turn.
 
-`src/memory_trust.trusted(record, prefs)` — one classifier, both hosts:
+### Compatibility reference
 
-- **Hand-authored** (`source_type=human`) and **explicitly pinned**
-  records are ALWAYS trusted (a pin is an endorsement).
-- Everything auto-captured is trusted only when the per-user MASTER
-  toggle (`memory_trust_auto`, default off) AND that kind's switch
-  (`memory_trust_auto_kinds`; defaults: fact/episodic/fabric/wiki on,
-  instruction/persona off) are both on. `raw`/unknown kinds never.
-- The classifier keys on record fields, never digest-array membership —
-  fm auto-includes every persona-kind record in the digest's pinned
-  array, and that membership is NOT an endorsement.
+The legacy capture path stores eligible turn evidence, can propose a candidate without a model, and may enrich a candidate with entities, edges and retrieval cues on its configured task endpoint. The `memory_graph` settings control the enrichment cadence. MiMo's `capture.ts` manages session scope. Its authored-file reconciler uses section content hashes to project eligible `MEMORY.md` files when the provider supports authored ingest.
 
-Trusted records render in an **endorsed guidance block** directly below
-the persona (real force, system role; behavior kinds whole, capped;
-knowledge kinds headline-only). Everything else stays inside the
-`untrusted_context_message` guard wrapper — the injection firewall is
-unchanged for untrusted content, and a memory never appears on both
-sides of the split. Presentation mirror:
-`static/js/util/memoryTrust.js` (parity-tested against the Python
-classifier).
+The compatibility digest splits `[Memory Index]` context from `[Endorsed Memory Guidance]` using `src/memory_digest.py` and `src/memory_trust.py`. The classifier checks the record's source and explicit pin. Listing a persona entry among digest headlines does not itself grant endorsement. The `memory_trust_auto` preference and per-kind choices govern trust for auto-captured entries on this path.
 
-## Pull recall (T8: pitch first, pull by choice)
-
-- The conversation UX is Agent-only. `recall_memory` remains an always-available
-  read-only Agent tool while `manage_memory` owns writes. Pulled results inherit
-  the trust split: endorsed plain, the rest guard-wrapped.
-- MiMo Agent sessions request scoped recall through the host service. Named auxiliary inference has a wildcard tool deny and no generic
-  conversation endpoint. Temporary Agent and Compare receive no memory capture;
-  Temporary Agent also receives no digest or Memery access.
-
-## Open questions (known-unknowns metaplan, 2026-07-17)
-
-`kind=unknown` is a question the user wants answered ("user's name?"),
-question-form even as a fragment.
-
-- **Human-minted only (U2)**: Brain add or a directed instruction
-  (`manage_memory` add with category `unknown`/`question`). The capture
-  pipeline hard-rejects the kind outside manual admission
-  (`unknown_kind_requires_manual`), so every unknown is
-  `source_type=human` → always trusted, no new toggle. Content
-  normalizes to one trailing `?` on save and update.
-- **Surfacing (U6)**: the digest carries `open_questions` (scoped, cap
-  5); the renderer places them INSIDE the endorsed guidance block with
-  weave-in framing — bring one up when the conversation is already
-  nearby, never interrogate. Human-only entries render (K5
-  defense-in-depth). They recall like any record; `recall_memory`
-  annotates them `[open question]`.
-- **Promotion (U4/U5)**: groom op `promote_unknowns` — the same
-  question open in >= 3 distinct workspaces merges into one global
-  record (earliest copy canonical, idempotent), workspace copies
-  archive with `{merged_into}`. Same-question matching is a
-  deterministic overlap coefficient over stopword-free, lightly
-  stemmed tokens, one conservative threshold (0.6,
-  `native/memery/crates/memery-core/src/curate/questions.rs`).
-- **Resolution (U7)**: three doors, all landing on the same archive
-  surface (`archived=1` + `{resolved_by, resolved_at}` — never a plain
-  delete): the Brain card's ✓ Resolve, the directed `manage_memory`
-  resolve action, and PASSIVE resolution — every admission (candidate
-  accept, capture direct admission, authored ingest) fuzzy-checks the
-  new content against open questions in scope and closes what it
-  answers. The hook lives at admission sites only, never in
-  `upsert_curated`, so decay/dedup/reflect can never close a question
-  (regression-pinned).
+A human can open a question with the `unknown` kind. Compatible digest providers can surface up to five open questions. The legacy grooming operation `promote_unknowns` matches recurring questions across workspaces, and resolution archives the record while keeping resolution metadata. Guarded review operations use the current record revision and original request identity. See `routes/memory/memory_routes.py` for the accepted request shapes.
 
 ## Brain surfaces
 

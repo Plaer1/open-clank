@@ -251,6 +251,10 @@ In **Inspect**, **Raw trajectory** shows captured evidence, **History** shows re
 
 To correct an outdated claim, open the newer item in **Memories → … → Details → Review relationship**. Choose the earlier item or **Find suggested pairs**. Use **Compare evidence** to read both claims and their sources. Choose **Preview supersession → Confirm supersession** or **Decline pair**. **Detach** removes a confirmed link while keeping both histories.
 
+## Turn a memory into lasting guidance
+
+Use `/remember` followed by a fact in chat to save it to Memery. A fact can inform a reply without changing the assistant’s personality. To make it a lasting preference, choose **Review as a persona change** on the memory, read the source and edit the proposed instructions before saving. Under **Settings → AI Defaults**, you can export a persona with a selected knowledge bundle. Import lets you review the persona and the included memories separately.
+
 ## Review an import batch
 
 Use **Add → Add Memory → Import** to select files. When processing finishes, open **review** on the banner in **Memories**. Check suggestions against their sources and edit, save or reject each one. Use **check import status** for files that need attention.
@@ -574,6 +578,10 @@ In **Authorized workspaces**, choose the project and **Review changed contract**
 ## General instructions
 
 Choose **New General Hex**. Enter a title and instruction. With no tags it applies across your account. Experimental Workspace or Task tags apply on any positive match. Preview the revisions for the next turn or operation. Running work keeps its pinned revision.
+
+If a rule has gone stale, select it and choose **Create draft**. Cite the saved memory that shows what changed. Pick **Edit** for replacement wording or **Archive** to retire the rule. A draft can refer to several parent Hexes.
+
+Open **Review** to compare the current rule, proposed wording and evidence. An agent can submit a draft here. The current rule applies until you accept the change. The evidence scan checks previously linked sources for changes. A rule with no linked source needs a manual review. In the rule’s **History**, **Save checkpoint** records the revision in Lore when your Memery backup settings allow it.
 
 Review the candidate and affected paths before applying a General Hex to a workspace. Review imported or agent-assisted revisions before making them eligible. Mandatory workspace rules still apply.
 """),

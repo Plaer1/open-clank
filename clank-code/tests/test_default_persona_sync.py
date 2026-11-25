@@ -195,7 +195,7 @@ def _default_persona_endpoint():
 
 
 def _persona_request(**state):
-    auth_manager = SimpleNamespace(is_configured=True)
+    auth_manager = SimpleNamespace(is_configured=True, users={"alice": {}})
     return SimpleNamespace(
         state=SimpleNamespace(**state),
         app=SimpleNamespace(state=SimpleNamespace(auth_manager=auth_manager)),
@@ -203,7 +203,7 @@ def _persona_request(**state):
     )
 
 
-def test_default_persona_route_allows_explicit_single_user_mode(monkeypatch):
+def test_default_persona_route_requires_a_verified_browser_even_with_legacy_env(monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "false")
     monkeypatch.setattr(
         default_persona,
@@ -211,7 +211,11 @@ def test_default_persona_route_allows_explicit_single_user_mode(monkeypatch):
         lambda owner, preset_manager=None: {"owner": owner},
     )
 
-    assert asyncio.run(_default_persona_endpoint()(_persona_request())) == {"owner": ""}
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(_default_persona_endpoint()(_persona_request()))
+    assert raised.value.status_code == 401
+    verified = _persona_request(authenticated=True, current_user="alice")
+    assert asyncio.run(_default_persona_endpoint()(verified)) == {"owner": "alice"}
 
 
 def test_default_persona_route_keeps_configured_auth_fail_closed(monkeypatch):
@@ -221,3 +225,15 @@ def test_default_persona_route_keeps_configured_auth_fail_closed(monkeypatch):
         asyncio.run(_default_persona_endpoint()(_persona_request()))
 
     assert raised.value.status_code == 401
+
+def test_review_rejects_stale_persona_and_preserves_saved_state(manager, monkeypatch):
+    before = default_persona.factory_default()
+    set_default_persona("alice", system_prompt="Be direct.", expected=before, preset_manager=manager, sync_assistant=False)
+    with pytest.raises(default_persona.PersonaConflict):
+        set_default_persona("alice", system_prompt="Stale draft.", expected=before, preset_manager=manager)
+    monkeypatch.setattr(manager, "save", lambda data: False)
+    with pytest.raises(OSError):
+        set_default_persona("alice", system_prompt="Failed write.", preset_manager=manager)
+    assert get_default_persona("alice", preset_manager=manager)["system_prompt"] == "Be direct."
+    endpoint = next(r.endpoint for r in setup_preset_routes(manager).routes if r.path == "/api/presets")
+    assert "default_personas" not in asyncio.run(endpoint())

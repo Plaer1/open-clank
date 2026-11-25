@@ -1805,14 +1805,14 @@ class HistoryClient:
     def sweep_memery_components(self):
         self._call({"SweepMemeryComponents": self._control_envelope("memery-history")})
 
-    def get_memery_manifest(self, *, assets=False) -> dict[str, Any]:
-        return self._call({"GetMemeryManifest": {"envelope": self._control_envelope("memery-history"), "assets": assets}})["MemeryManifest"]
+    def get_memery_manifest(self, *, assets=False, guidance=False) -> dict[str, Any]:
+        return self._call({"GetMemeryManifest": {"envelope": self._control_envelope("memery-history"), "assets": "guidance" if guidance else assets}})["MemeryManifest"]
 
-    def settle_memery_manifest(self, generation, position, witness, add, remove, *, assets=False, checkpoint=False):
+    def settle_memery_manifest(self, generation, position, witness, add, remove, *, assets=False, checkpoint=False, guidance=False):
         return self._call({"SettleMemeryManifest": {
             "envelope": self._control_envelope("memery-history"), "generation": generation,
             "position": position, "witness": witness, "add": add, "remove": remove,
-            "assets": assets, "checkpoint": checkpoint,
+            "assets": "guidance" if guidance else assets, "checkpoint": checkpoint,
         }})["MemeryManifest"]
 
     def get_policy(self) -> dict[str, Any]:
