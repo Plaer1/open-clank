@@ -30,7 +30,7 @@ jobs:
       RUSTUP_TOOLCHAIN: 1.99.0-aarch64-apple-darwin
       EMOJI_RELEASE_TAG: ${{ inputs.emoji_release_tag || 'v1.0.2-beta.1-artwork-compact' }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Require native Apple Silicon and shared asset access
@@ -67,7 +67,7 @@ jobs:
           assert digest.hexdigest() == part["sha256"]
           print("Compact artwork: exact three public files admitted against sealed source pins")
           PYTHON
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13.16'
           architecture: arm64
@@ -106,7 +106,7 @@ jobs:
           Path("dist/macos-provenance/build-identity.json").write_text(json.dumps(record, indent=2) + "\n")
           PYTHON
       - name: Retain sealed build evidence before private runtime qualification
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Open-Clank-macos-arm64-build-unqualified
           path: |
@@ -134,7 +134,7 @@ jobs:
           set -euo pipefail
           python3 -B scripts/qualify_macos_package.py --dmg dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg --output dist/macos-qualification --emoji-pack "$QUALIFICATION_EMOJI_PACK"
           # AppKit GUI Quit and Screen Recording permission journeys require separate native manual evidence.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Open-Clank-macos-arm64
           path: |
